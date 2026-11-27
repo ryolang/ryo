@@ -11,13 +11,14 @@ use super::{
     FuncCtx, NeverMode, Scope, ScopeArena, ScopeId, Sema, SemaExprContext, StructState, Task,
 };
 use ryo_core::spine::ChainSpine;
-use ryo_core::tir::TirRef;
+use ryo_core::tir::{BindingId, MatchBinding, TirRef};
 use ryo_core::types::TypeId;
 use ryo_core::uir::{InstData, InstRef, InstTag, UirArmBodyView, UirMatchArmView};
 use std::collections::HashMap;
 
 struct PendingArm {
     scope_id: ScopeId,
+    bindings: Vec<MatchBinding>,
     owners: Vec<(u32, TypeId)>,
     binding_error: bool,
 }
@@ -58,6 +59,7 @@ pub(super) struct StmtState {
     block: BlockState,
     condition: Option<TirRef>,
     value: Option<TirRef>,
+    binding: Option<BindingId>,
     then_tirs: Option<Vec<TirRef>>,
     elif_tirs: Vec<(TirRef, Vec<TirRef>)>,
     next_elif: usize,
@@ -72,6 +74,7 @@ impl StmtState {
             block,
             condition: None,
             value: None,
+            binding: None,
             then_tirs: None,
             elif_tirs: Vec::new(),
             next_elif: 0,
@@ -171,6 +174,7 @@ impl<'a> MatchState<'a> {
             (node, index),
             PendingArm {
                 scope_id: child_scope,
+                bindings: preparation.bindings,
                 owners: preparation.owners,
                 binding_error: preparation.binding_error,
             },
@@ -207,16 +211,18 @@ impl<'a> MatchState<'a> {
 
     fn child_block(
         &mut self,
+        fcx: &mut FuncCtx,
         parent_scope_id: ScopeId,
         statements: Vec<InstRef>,
-        seed: impl FnOnce(&mut Scope),
+        seed: impl FnOnce(&mut FuncCtx, &mut Scope),
     ) -> BlockState {
         let parent = self.scopes.take_parent(parent_scope_id);
         let mut scope = Scope {
+            id: fcx.next_scope(),
             parent: Some(parent),
             bindings: HashMap::new(),
         };
-        seed(&mut scope);
+        seed(fcx, &mut scope);
         let scope_id = self.scopes.push(scope);
         BlockState::child(statements, scope_id, parent_scope_id)
     }
@@ -270,7 +276,7 @@ impl<'a> MatchState<'a> {
                     InstTag::AssignOrDecl => {
                         let name = sema.uir.assign_or_decl_view(stmt).name;
                         match self.scopes.get(scope_id).lookup_full(name) {
-                            Some((existing, true)) => Some(existing),
+                            Some(binding) if binding.mutable => Some(binding.ty),
                             _ => None,
                         }
                     }
@@ -330,7 +336,7 @@ impl<'a> MatchState<'a> {
                 check_condition_bool(sema, fcx, condition, view.cond);
                 state.condition = Some(condition);
                 let body = view.then_stmts.iter().collect::<Vec<_>>();
-                let block = self.child_block(scope_id, body, |_| {});
+                let block = self.child_block(fcx, scope_id, body, |_, _| {});
                 tasks.push(Task::StmtBody(state));
                 tasks.push(Task::BlockEnter(block));
             }
@@ -341,7 +347,7 @@ impl<'a> MatchState<'a> {
                 state.condition = Some(condition);
                 let body = view.body.iter().collect::<Vec<_>>();
                 fcx.loop_depth += 1;
-                let block = self.child_block(scope_id, body, |_| {});
+                let block = self.child_block(fcx, scope_id, body, |_, _| {});
                 tasks.push(Task::StmtBody(state));
                 tasks.push(Task::BlockEnter(block));
             }
@@ -364,13 +370,15 @@ impl<'a> MatchState<'a> {
                 let int_ty = sema.pool.int();
                 let error_ty = sema.pool.error_type();
                 fcx.loop_depth += 1;
-                let block = self.child_block(scope_id, body, |scope| {
-                    if is_reserved {
-                        scope.insert_binding(var_name, error_ty, false, false);
+                let mut loop_id = None;
+                let block = self.child_block(fcx, scope_id, body, |fcx, scope| {
+                    loop_id = Some(if is_reserved {
+                        scope.insert_binding(fcx, var_name, error_ty, false, false, span)
                     } else {
-                        scope.insert_dead_store_binding(var_name, int_ty, false, false, span);
-                    }
+                        scope.insert_dead_store_binding(fcx, var_name, int_ty, false, false, span)
+                    });
                 });
+                state.binding = loop_id;
                 tasks.push(Task::StmtBody(state));
                 tasks.push(Task::BlockEnter(block));
             }
@@ -459,12 +467,11 @@ impl<'a> MatchState<'a> {
             }
             InstTag::ForRange => {
                 fcx.loop_depth -= 1;
-                let var_name = sema.uir.for_range_view(state.statement).var_name;
                 let value = finish_for_range(
                     sema,
                     fcx,
                     state.statement,
-                    var_name,
+                    state.binding.take().expect("range binding seeded"),
                     state.condition.take().expect("range start analyzed"),
                     state.value.take().expect("range end analyzed"),
                     &body,
@@ -489,7 +496,7 @@ impl<'a> MatchState<'a> {
             tasks.push(Task::Enter(elif.cond, scope_id, NeverMode::Reject));
         } else if let Some(else_stmts) = view.else_stmts {
             let body = else_stmts.iter().collect::<Vec<_>>();
-            let block = self.child_block(state.scope_id, body, |_| {});
+            let block = self.child_block(fcx, state.scope_id, body, |_, _| {});
             tasks.push(Task::IfElse(state));
             tasks.push(Task::BlockEnter(block));
         } else {
@@ -523,7 +530,7 @@ impl<'a> MatchState<'a> {
         check_condition_bool(sema, fcx, condition, elif.cond);
         state.value = Some(condition);
         let body = elif.body.iter().collect::<Vec<_>>();
-        let block = self.child_block(state.scope_id, body, |_| {});
+        let block = self.child_block(fcx, state.scope_id, body, |_, _| {});
         tasks.push(Task::ElifBody(state));
         tasks.push(Task::BlockEnter(block));
     }
@@ -578,6 +585,7 @@ impl<'a> MatchState<'a> {
         let uir_arms = match_arms(sema, node);
         let PendingArm {
             scope_id,
+            bindings,
             owners,
             binding_error,
         } = self
@@ -594,6 +602,7 @@ impl<'a> MatchState<'a> {
         let parent = scope.take_parent().expect("arm has a parent scope");
         let preparation = MatchArmPreparation {
             scope,
+            bindings,
             owners,
             binding_error,
         };

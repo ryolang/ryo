@@ -526,6 +526,71 @@ fn outer() -> (A | B)!str:
 }
 
 #[test]
+fn generated_try_and_catch_bindings_receive_ids() {
+    let src = r#"error A
+fn inner() -> A!int:
+	return 1
+fn try_outer() -> A!int:
+	value = try inner()
+	return value
+fn catch_main():
+	value = inner() catch:
+		A: 0
+	print(value)
+"#;
+    let (tirs, pool) = run(src).expect("direct try and catch should compile");
+    let mut generated = Vec::new();
+    for (function, prefix) in [("try_outer", "__ryo_try_"), ("catch_main", "__ryo_catch_")] {
+        let tir = tir_named(&tirs, &pool, function);
+        for index in 1..tir.instructions.len() {
+            let reference = TirRef::from_raw(index as u32);
+            if tir.inst(reference).tag != TirTag::Match {
+                continue;
+            }
+            for binding in tir
+                .match_view(reference)
+                .arms()
+                .flat_map(|arm| arm.bindings())
+            {
+                let info = tir
+                    .bindings()
+                    .get(binding.id)
+                    .expect("generated binding metadata");
+                let name = pool.str(info.name);
+                if name.starts_with(prefix) {
+                    generated.push((name.to_string(), binding.id, info.scope));
+                }
+            }
+        }
+    }
+    assert_eq!(generated.len(), 4, "generated bindings: {generated:?}");
+    for prefix in [
+        "__ryo_try_success_",
+        "__ryo_try_error_",
+        "__ryo_catch_success_",
+        "__ryo_catch_error_",
+    ] {
+        assert_eq!(
+            generated
+                .iter()
+                .filter(|(name, _, _)| name.starts_with(prefix))
+                .count(),
+            1,
+            "missing generated binding for {prefix}"
+        );
+    }
+    for prefix in ["__ryo_try_", "__ryo_catch_"] {
+        let ids = generated
+            .iter()
+            .filter(|(name, _, _)| name.starts_with(prefix))
+            .map(|(_, id, _)| *id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "IDs must differ within {prefix} scope");
+    }
+}
+
+#[test]
 fn try_rejects_a_non_union_operand() {
     let src = r#"error A
 fn f() -> A!int:

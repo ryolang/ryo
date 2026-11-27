@@ -337,8 +337,8 @@ fn resolved_error(
     fields: Vec<(u32, InstRef)>,
 ) -> Candidate {
     let shadowed = match (family_root, family_member) {
-        (Some(root), Some(_)) => scope.lookup(root).map(|bound| (root, bound)),
-        _ => scope.lookup(name).map(|bound| (name, bound)),
+        (Some(root), Some(_)) => scope.lookup(root).map(|bound| (root, bound.ty)),
+        _ => scope.lookup(name).map(|bound| (name, bound.ty)),
     };
     Candidate::Error(ResolvedErrorConstruct {
         name,

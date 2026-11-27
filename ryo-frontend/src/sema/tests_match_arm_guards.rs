@@ -5,10 +5,10 @@
 //! of `tests_match.rs` to stay under the file-length limit.
 
 use super::tests::*;
-use super::tests_match::match_in_var_init;
+use super::tests_match::{assert_bindings, match_in_var_init};
 use super::*;
 use ryo_core::ast::LitPattern;
-use ryo_core::tir::{Discriminant, MatchBinding, TirRef, TirTag};
+use ryo_core::tir::{Discriminant, TirRef, TirTag};
 
 // ---------- R12/R13 fix coverage: anon-arm guards, jump-terminated arms ----------
 
@@ -35,14 +35,10 @@ fn anon_arm_literal_guards_reach_the_typed_wire() {
         "the literal field constraint reaches the wire"
     );
     let py = pool.find_str("py").expect("`py` interned");
-    assert_eq!(
+    assert_bindings(
+        main,
         arm0.bindings().collect::<Vec<_>>(),
-        [MatchBinding {
-            field_index: 1,
-            name: py,
-            ty: pool.int(),
-        }],
-        "the `y` bind coexists with the guard"
+        &[(1, py, pool.int())],
     );
     // The wildcard fallback arm carries no guards.
     assert_eq!(view.arm(1).guard_count(), 0);

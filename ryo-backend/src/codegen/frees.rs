@@ -7,11 +7,11 @@ use super::{Codegen, FunctionContext, ValueRepr, is_fat_type};
 use cranelift::codegen::ir::{FuncRef, InstructionData, Opcode, ValueDef};
 use cranelift::prelude::*;
 use cranelift_module::Module;
-use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId};
+use ryo_core::tir::{BindingId, Tir, TirData, TirRef, TirTag};
+use ryo_core::types::InternPool;
 
 /// Producer and parameter labels used only for representation elision.
-type FreeBindingTables = (Vec<Option<StringId>>, Vec<Option<StringId>>);
+type FreeBindingTables = (Vec<Option<BindingId>>, Vec<Option<BindingId>>);
 
 impl<M: Module> Codegen<M> {
     /// Emit the drops assigned to one resolved firing-point bucket.
@@ -29,9 +29,9 @@ impl<M: Module> Codegen<M> {
             return Ok(());
         }
         // Consume (mark) every bucket entry, emitting frees only for
-        // targets not already destroyed: the ownership pass's
-        // double-anchors (consumer + return epilogue) make one
-        // same-target duplicate a no-op by design.
+        // targets not already destroyed. Production scheduling avoids
+        // the redundant same-return pair; explicitly injected duplicate
+        // entries remain no-ops.
         let mut pending: Vec<(usize, TirRef)> = Vec::new();
         for &idx in indices {
             if idx >= ctx.sidecar.drops.len() {
@@ -179,14 +179,14 @@ impl<M: Module> Codegen<M> {
             // applicability is a lowering-time lineage fact), so a mark
             // here always agrees with the branch the emission path
             // would take.
-            let binding_name = match plan.releases[idx] {
+            let binding = match plan.releases[idx] {
                 ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => {
-                    Some(flow.place(place).name())
+                    flow.place(place).binding_id()
                 }
                 ryo_core::flow::cleanup::ReleaseStorage::Value(_) => None,
             };
-            match binding_name {
-                Some(name) => {
+            match binding {
+                Some(binding) => {
                     // Binding-redirect path: the free releases the
                     // binding's CURRENT home contents, so NO
                     // static-literal elision is sound — in-place
@@ -197,7 +197,7 @@ impl<M: Module> Codegen<M> {
                     // stays at emission. Only the provably-inline
                     // producer elision is lowering-time derivable here,
                     // and only for never-mutated bindings.
-                    if !fat_mutated[name.raw() as usize] && inline_producer {
+                    if !fat_mutated[binding.index()] && inline_producer {
                         freed_at[idx] = true;
                     }
                 }
@@ -251,8 +251,8 @@ impl<M: Module> Codegen<M> {
     /// Per-function mutation pre-scan backing the provably-inline free
     /// elision. Returns two dense tables:
     ///
-    /// * `fat_mutated`, keyed by `StringId::raw()`: bindings whose
-    ///   storage can change after initialization — `Assign` targets,
+    /// * `fat_mutated`, keyed by `BindingId`: bindings whose storage can
+    ///   change after initialization — `Assign` targets,
     ///   `str_push`/`bytes_push` targets, fat `inout` call args, and
     ///   slice/`ToView` bases (promote-on-view writes the heap triple
     ///   back into the binding). A binding on this list may hold a heap
@@ -267,26 +267,31 @@ impl<M: Module> Codegen<M> {
         flow: &ryo_core::flow::Flow,
         pool: &InternPool,
     ) -> (Vec<bool>, Vec<bool>) {
-        let mut mutated = vec![false; pool.string_count()];
+        let mut mutated = vec![false; tir.bindings().len()];
         let mut view_bases = vec![false; tir.instructions.len()];
         for step in &flow.steps {
             for place in flow.mutations(&step.facts) {
-                if is_fat_type(flow.place(place).ty(), pool) {
-                    mutated[flow.place(place).name().raw() as usize] = true;
+                if is_fat_type(flow.place(place).ty(), pool)
+                    && let Some(binding) = flow.place(place).binding_id()
+                {
+                    mutated[binding.index()] = true;
                 }
             }
             if let Some(write) = step.facts.write
                 && write.kind != ryo_core::flow::WriteKind::Init
                 && is_fat_type(flow.place(write.place).ty(), pool)
+                && let Some(binding) = flow.place(write.place).binding_id()
             {
-                mutated[flow.place(write.place).name().raw() as usize] = true;
+                mutated[binding.index()] = true;
             }
             if let Some(view) = step.facts.view {
                 let ryo_core::flow::Place::View { base, .. } = flow.place(view) else {
                     unreachable!("view fact names a view place");
                 };
                 if is_fat_type(flow.place(*base).ty(), pool) {
-                    mutated[flow.place(*base).name().raw() as usize] = true;
+                    if let Some(binding) = flow.place(*base).binding_id() {
+                        mutated[binding.index()] = true;
+                    }
                     let value = match tir.inst(step.inst).data {
                         TirData::Slice { base, .. } | TirData::UnOp(base) => base,
                         _ => unreachable!("view step has a base operand"),
@@ -359,18 +364,9 @@ impl<M: Module> Codegen<M> {
             ctx.freed_at[idx] = true;
             let binding = match ctx.cleanup_plan.releases[idx] {
                 ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => {
-                    Some(match ctx.flow.place(place) {
-                        ryo_core::flow::Place::Local { decl, .. } => *decl,
-                        ryo_core::flow::Place::Token { inst, .. } => *inst,
-                        ryo_core::flow::Place::Param { index, .. } => {
-                            TirRef::param(*index as usize)
-                        }
-                        _ => {
-                            return Err(format!(
-                                "cleanup binding has no backend storage: {place:?}"
-                            ));
-                        }
-                    })
+                    Some(ctx.flow.place(place).binding_id().ok_or_else(|| {
+                        format!("cleanup binding has no backend storage: {place:?}")
+                    })?)
                 }
                 ryo_core::flow::cleanup::ReleaseStorage::Value(_) => None,
             };
@@ -389,18 +385,15 @@ impl<M: Module> Codegen<M> {
             // Storage selection is complete before emission. Representation caches
             // supply register values, never the identity of a release.
             if let Some(binding) = binding {
-                let storage = ctx
-                    .fat_binding_storage
-                    .get(&binding)
-                    .copied()
-                    .ok_or_else(|| {
+                let storage =
+                    Self::read_slot(&ctx.fat_binding_storage, binding).ok_or_else(|| {
                         format!("cleanup target {target:?} has no storage for binding {binding:?}")
                     })?;
                 Self::require_fat_storage_binding(storage, binding)?;
                 // Scoped provenance can elide a call only for this exact storage.
-                // Name restoration must never select a different binding's buffer.
-                let inline = Self::free_binding_name(ctx, target)
-                    .and_then(|name| Self::read_slot(&ctx.fat_locals, name))
+                // Control-flow restoration must never select another binding's buffer.
+                let inline = Self::free_binding_id(ctx, target)
+                    .and_then(|binding| Self::read_slot(&ctx.fat_locals, binding))
                     .is_some_and(|active| {
                         active.ptr == storage.ptr
                             && active.home == storage.home
@@ -499,8 +492,8 @@ impl<M: Module> Codegen<M> {
     ///   discriminated variant, so the field address is the scrutinee
     ///   slot plus the pool-computed absolute offset.
     /// * Conditional dead drops — the target is a pre-branch owner;
-    ///   resolved through `free_binding_names` (the init→name map), so
-    ///   the freed buffer is the binding's current triple at that
+    ///   resolved through `free_binding_ids` (the producer→BindingId
+    ///   labels), so the freed buffer is the binding's current triple at that
     ///   program point, family-appropriate (enum tag-dispatched /
     ///   struct recursive / fat triple — the exact emission the old
     ///   block-start hook performed).
@@ -563,33 +556,28 @@ impl<M: Module> Codegen<M> {
     /// enumerates exactly once) registers its producer inst as a free
     /// target of the written place:
     ///
-    /// * names come from the write instruction (as before);
-    /// * binding identity comes from the [`Place`] (the declaring
-    ///   `VarDecl` ref, the param sentinel, or the match/destructure
-    ///   owner token) — never from a name lookup, so same-named
-    ///   shadows stay distinct;
+    /// * semantic binding labels come from the written Flow place, never
+    ///   from a name lookup, so same-named shadows stay distinct;
     ///
     /// This replaces the previous backend-side recursive walk (with
     /// its statement/value-position match special-casing and its
     /// dependency on `sidecar.assign_binding`): the Flow IR carries the
     /// same facts structurally.
-    pub(crate) fn build_free_binding_names(
+    pub(crate) fn build_free_binding_ids(
         tir: &Tir,
         flow: &ryo_core::flow::Flow,
         pool: &InternPool,
     ) -> FreeBindingTables {
-        let mut param_names = vec![None; tir.params.len()];
+        let mut param_ids = vec![None; tir.params.len()];
         for (idx, param) in tir.params.iter().enumerate() {
             if is_fat_type(param.ty, pool) {
-                // A fat param's binding identity is its own sentinel ref
-                // (params are bound at entry and never shadowed).
-                param_names[idx] = Some(param.name);
+                param_ids[idx] = Some(param.id);
             }
         }
-        let mut inst_names = vec![None; tir.instructions.len()];
+        let mut inst_ids = vec![None; tir.instructions.len()];
         for place in &flow.places {
-            if let ryo_core::flow::Place::Token { inst, name, .. } = *place {
-                inst_names[inst.index()] = Some(name);
+            if let ryo_core::flow::Place::Token { inst, binding, .. } = *place {
+                inst_ids[inst.index()] = Some(binding);
             }
         }
         for step in &flow.steps {
@@ -599,28 +587,26 @@ impl<M: Module> Codegen<M> {
             // In-place mutations (compound assign, push, field writes)
             // preserve storage identity — they register nothing, as
             // before.
-            let (name, value) = match (tir.inst(step.inst).tag, write.kind) {
+            let value = match (tir.inst(step.inst).tag, write.kind) {
                 (TirTag::VarDecl, ryo_core::flow::WriteKind::Init) => {
-                    let view = tir.var_decl_view(step.inst);
-                    (view.name, view.initializer)
+                    tir.var_decl_view(step.inst).initializer
                 }
                 (TirTag::Assign, ryo_core::flow::WriteKind::Replace) => {
-                    let view = tir.assign_view(step.inst);
-                    (view.name, view.value)
+                    tir.assign_view(step.inst).value
                 }
                 _ => continue,
             };
-            inst_names[value.index()] = Some(name);
-            // A release may target the
-            // declaring `VarDecl` itself — the seat of a binding whose
-            // owner is the binding's home place (a moved-through-`Var`
-            // value). The decl names its binding exactly like an init
-            // value does, so the binding-path redirect resolves it.
+            let Some(binding) = flow.place(write.place).binding_id() else {
+                continue;
+            };
+            inst_ids[value.index()] = Some(binding);
+            // A release may target the declaring `VarDecl` itself — the
+            // seat of a binding whose owner is the binding's home place.
             if tir.inst(step.inst).tag == TirTag::VarDecl {
-                inst_names[step.inst.index()] = Some(name);
+                inst_ids[step.inst.index()] = Some(binding);
             }
         }
-        (inst_names, param_names)
+        (inst_ids, param_ids)
     }
 }
 
@@ -731,12 +717,12 @@ impl<M: Module> Codegen<M> {
                     .is_some_and(|max| max as usize <= ryo_runtime::INLINE_CAP);
                 let redirect = match ctx.cleanup_plan.releases[idx] {
                     ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => {
-                        Some(ctx.flow.place(place).name())
+                        ctx.flow.place(place).binding_id()
                     }
                     ryo_core::flow::cleanup::ReleaseStorage::Value(_) => None,
                 };
                 match redirect {
-                    Some(name) => inline_producer && !fat_mutated[name.raw() as usize],
+                    Some(binding) => inline_producer && !fat_mutated[binding.index()],
                     None => static_literal || (inline_producer && !view_base_insts[target.index()]),
                 }
             };
@@ -750,22 +736,13 @@ impl<M: Module> Codegen<M> {
                 if ctx.fire_marked[idx] {
                     let resolved = match ctx.cleanup_plan.releases[idx] {
                         ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => {
-                            let binding = match ctx.flow.place(place) {
-                                ryo_core::flow::Place::Local { decl, .. } => Some(*decl),
-                                ryo_core::flow::Place::Token { inst, .. } => Some(*inst),
-                                ryo_core::flow::Place::Param { index, .. } => {
-                                    Some(TirRef::param(*index as usize))
-                                }
-                                _ => None,
-                            };
-                            binding.is_some_and(|binding| {
-                                ctx.aggregate_binding_storage.contains_key(&binding)
-                                    || ctx.fat_binding_storage.get(&binding).is_some_and(
-                                        |storage| {
-                                            Self::require_fat_storage_binding(*storage, binding)
+                            ctx.flow.place(place).binding_id().is_some_and(|binding| {
+                                Self::read_slot(&ctx.aggregate_binding_storage, binding).is_some()
+                                    || Self::read_slot(&ctx.fat_binding_storage, binding)
+                                        .is_some_and(|storage| {
+                                            Self::require_fat_storage_binding(storage, binding)
                                                 .is_ok()
-                                        },
-                                    )
+                                        })
                             })
                         }
                         ryo_core::flow::cleanup::ReleaseStorage::Value(value) => {
@@ -795,7 +772,7 @@ impl<M: Module> Codegen<M> {
     /// Validate the physical representation selected for a declaring binding.
     pub(super) fn require_fat_storage_binding(
         storage: super::FatLocals,
-        expected: TirRef,
+        expected: BindingId,
     ) -> Result<(), String> {
         if storage.binding != Some(expected) {
             return Err(format!(
@@ -806,25 +783,24 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// Read the free-target → binding-name map. Param sentinel refs
-    /// are served from `free_binding_param_names`; real instruction
-    /// refs from `free_binding_names`. Same dispatch shape as
-    /// `cached_repr`.
-    pub(crate) fn free_binding_name(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
-        Self::free_binding_name_tables(&ctx.free_binding_names, &ctx.free_binding_param_names, r)
+    /// Read the free-target → semantic-binding labels. Param sentinel
+    /// refs use `free_binding_param_ids`; real instruction refs use
+    /// `free_binding_ids`. Same dispatch shape as `cached_repr`.
+    pub(crate) fn free_binding_id(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<BindingId> {
+        Self::free_binding_id_tables(&ctx.free_binding_ids, &ctx.free_binding_param_ids, r)
     }
 
-    /// Table form of [`Self::free_binding_name`] — usable before the
+    /// Table form of [`Self::free_binding_id`] — usable before the
     /// `FunctionContext` exists (the lowering-time pre-filter).
-    fn free_binding_name_tables(
-        free_binding_names: &[Option<StringId>],
-        free_binding_param_names: &[Option<StringId>],
+    fn free_binding_id_tables(
+        free_binding_ids: &[Option<BindingId>],
+        free_binding_param_ids: &[Option<BindingId>],
         r: TirRef,
-    ) -> Option<StringId> {
+    ) -> Option<BindingId> {
         if let Some(idx) = r.as_param_index() {
-            free_binding_param_names[idx as usize]
+            free_binding_param_ids[idx as usize]
         } else {
-            free_binding_names.get(r.index()).copied().flatten()
+            free_binding_ids.get(r.index()).copied().flatten()
         }
     }
 
@@ -866,8 +842,12 @@ impl<M: Module> Codegen<M> {
 
     /// Set the home-provenance flag on a fat binding. No-op for
     /// home-less bindings (the flag is meaningless without a home).
-    pub(crate) fn set_home_inline(ctx: &mut FunctionContext<'_, M>, name: StringId, inline: bool) {
-        if let Some(mut fl) = Self::read_slot(&ctx.fat_locals, name)
+    pub(crate) fn set_home_inline(
+        ctx: &mut FunctionContext<'_, M>,
+        binding: BindingId,
+        inline: bool,
+    ) {
+        if let Some(mut fl) = Self::read_slot(&ctx.fat_locals, binding)
             && fl.home.is_some()
             && fl.home_inline != inline
         {
@@ -875,7 +855,7 @@ impl<M: Module> Codegen<M> {
             Self::write_slot(
                 &mut ctx.fat_locals,
                 &mut ctx.fat_locals_undo,
-                name,
+                binding,
                 Some(fl),
             );
         }
@@ -887,12 +867,12 @@ impl<M: Module> Codegen<M> {
     /// table restore reverts the flag — a join must not trust
     /// pre-branch provenance.
     pub(crate) fn invalidate_home_inline_flags(ctx: &mut FunctionContext<'_, M>) {
-        let flagged: Vec<StringId> = (0..ctx.fat_locals.len())
+        let flagged: Vec<BindingId> = (0..ctx.fat_locals.len())
             .filter(|&i| ctx.fat_locals[i].is_some_and(|fl| fl.home.is_some() && fl.home_inline))
-            .map(|i| StringId::from_raw(u32::try_from(i).expect("StringId index out of range")))
+            .map(BindingId::from_index)
             .collect();
-        for name in flagged {
-            Self::set_home_inline(ctx, name, false);
+        for binding in flagged {
+            Self::set_home_inline(ctx, binding, false);
         }
     }
 }

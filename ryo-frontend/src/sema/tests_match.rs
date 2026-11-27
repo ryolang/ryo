@@ -33,6 +33,19 @@ pub(super) fn match_in_var_init(tir: &ryo_core::tir::Tir, stmt_idx: usize) -> Ti
     tir.var_decl_view(stmt_at(tir, stmt_idx)).initializer
 }
 
+pub(super) fn assert_bindings(
+    tir: &Tir,
+    actual: Vec<ryo_core::tir::MatchBinding>,
+    expected: &[(u32, StringId, TypeId)],
+) {
+    assert_eq!(actual.len(), expected.len());
+    for (binding, &(field_index, name, ty)) in actual.iter().zip(expected) {
+        assert_eq!(binding.field_index, field_index);
+        assert_eq!(tir.binding_name(binding.id), name);
+        assert_eq!(binding.ty, ty);
+    }
+}
+
 #[test]
 fn int_match_with_literal_and_wildcard_arms_resolves() {
     // `match 5:` with an int-literal arm and a wildcard: clean resolution
@@ -736,7 +749,13 @@ fn compiler_error_union_dispatch_synthesizes_hidden_alternatives() {
     let err_name = pool.intern_str("err");
     let err_bindings = [ryo_core::tir::MatchBinding {
         field_index: 0,
-        name: err_name,
+        id: fcx.register_binding(
+            err_name,
+            error,
+            ryo_core::tir::BindingKind::Temporary,
+            ryo_core::tir::ScopeId::from_index(0),
+            sp(),
+        ),
         ty: error,
     }];
     let ok_arm = ryo_core::tir::TypedMatchArm {
@@ -803,7 +822,7 @@ fn assert_error_member_arm(
             arm.discriminant == expected
                 && payload.is_none_or(|(name, ty)| {
                     arm.bindings()
-                        .any(|binding| binding.name == name && binding.ty == ty)
+                        .any(|binding| tir.binding_name(binding.id) == name && binding.ty == ty)
                 })
         })
     });

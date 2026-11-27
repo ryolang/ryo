@@ -5,8 +5,8 @@ use super::{
     UNTRACKED_PLACE, anchored_after, body_may_return, branch_may_not_return,
     convert_honored_reseat_drops, declared_before_stmt, enclosing_if_main_cond,
     if_may_fall_through, inout_escape_owner, last_use_anchor, outermost_branch_of,
-    outermost_loop_of, owner_sort_key, param_idx, schedule_loop_exit_frees_in,
-    schedule_return_epilogue_frees, suppress_redundant_exit_frees,
+    outermost_loop_of, owner_sort_key, schedule_loop_exit_frees_in, schedule_return_epilogue_frees,
+    suppress_redundant_exit_frees,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::flow::fire_points::FirePoints;
@@ -160,11 +160,13 @@ fn param_last_use_drop(ctx: &CleanupContext<'_>, own: &Ownership, owner: Owner) 
     // through the write-back pointer — never freed by the
     // callee, even if a branch merge left its owner stamped
     // Valid.
-    let name = ctx.flow.place(owner.0).name();
-    if own.inout_str_params.contains(&name) {
+    let ryo_core::flow::Place::Param { index, .. } = ctx.flow.place(owner.0) else {
+        return None;
+    };
+    let idx = *index as usize;
+    if ctx.tir.params[idx].mode == ryo_core::tir::ParamMode::Inout {
         return None;
     }
-    let idx = param_idx(&own.param_index, name);
     // Anchor the Free after the param's last read — the
     // same policy locals get — so later statements that
     // never touch the param don't keep its buffer alive.
@@ -491,11 +493,15 @@ pub(crate) fn drain_dead_stores(
     for (owner, (name, span, decl_inst, home)) in &sorted_dead {
         // Bound to an `inout str` param: the value escapes through the
         // write-back — it IS used, just not by any TIR instruction the
-        // pass can see. Checked by binding home (not by current owner): a
-        // rebind inside a branch is discarded by the merge, leaving the
-        // entry keyed by a branch-local owner the exit-time escape set
+        // pass can see. Checked by parameter home and mode (not by current
+        // owner): a rebind inside a branch is discarded by the merge, leaving
+        // the entry keyed by a branch-local owner the exit-time escape set
         // can't see. Same-named shadow bindings still warn. No W0001, no Free.
-        if own.inout_str_params.contains(name) && own.param_places[own.param_index[name]] == *home {
+        if matches!(
+            ctx.flow.place(*home),
+            ryo_core::flow::Place::Param { index, .. }
+                if ctx.tir.params[*index as usize].mode == ryo_core::tir::ParamMode::Inout
+        ) {
             continue;
         }
         if ctx.inout_escape_owners.contains(owner) {
@@ -530,17 +536,22 @@ pub(crate) fn drain_dead_stores(
         // value on taken paths, the pre-loop value on zero iterations.
         // When the body may `return`, keep the in-loop Free too — the
         // after-loop anchor is unreachable on the return path.
-        let (anchor, also_in_body) = match outermost_loop_of(ctx.tir, *decl_inst) {
-            Some(loop_stmt) if declared_before_stmt(ctx.tir, *name, loop_stmt) => {
-                let body = ctx
-                    .tir
-                    .loop_body_view(loop_stmt)
-                    .expect("outermost_loop_of returns loops");
-                let may_return = body_may_return(ctx.tir, &body);
-                (loop_stmt, may_return)
-            }
-            _ => (*decl_inst, false),
-        };
+        let (anchor, also_in_body) =
+            match outermost_loop_of(ctx.tir, *decl_inst) {
+                Some(loop_stmt)
+                    if ctx.flow.place(*home).binding_id().is_some_and(|binding| {
+                        declared_before_stmt(ctx.tir, binding, loop_stmt)
+                    }) =>
+                {
+                    let body = ctx
+                        .tir
+                        .loop_body_view(loop_stmt)
+                        .expect("outermost_loop_of returns loops");
+                    let may_return = body_may_return(ctx.tir, &body);
+                    (loop_stmt, may_return)
+                }
+                _ => (*decl_inst, false),
+            };
         sidecar.drops.push(DropOp {
             position: DropPosition::AfterStep { inst: anchor },
             target: owner.tirref(ctx.flow),

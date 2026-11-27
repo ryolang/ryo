@@ -300,7 +300,8 @@ fn return_has_direct_covering_drop(
         drop.target == owner
             && (path.on_path.contains(&anchor) || match_payload_drop)
             && !path.ancestors.contains(&anchor)
-            && drop_fires_on_return_path(tir, flow, fire_points, path, return_stmt, drop)
+            && (anchor == return_stmt
+                || drop_fires_on_return_path(tir, flow, fire_points, path, return_stmt, drop))
     })
 }
 

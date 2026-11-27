@@ -11,6 +11,28 @@ impl Tir {
         self.decl.hash(&mut hash);
         self.name.hash(&mut hash);
         self.return_type.hash(&mut hash);
+        for info in self.bindings.iter() {
+            let (source_context, source_revision) = info.span.source.raw_parts();
+            let (kind, mode) = match &info.kind {
+                crate::tir::BindingKind::Param(mode) => (0u64, *mode as u64),
+                crate::tir::BindingKind::Local { mutable, borrowed } => {
+                    (1u64, u64::from(*mutable) | (u64::from(*borrowed) << 1))
+                }
+                crate::tir::BindingKind::Temporary => (2u64, 0),
+            };
+            [
+                u64::from(info.name.raw()),
+                u64::from(info.ty.raw()),
+                u64::from(info.scope.raw()),
+                u64::from(source_context),
+                u64::from(source_revision),
+                info.span.start as u64,
+                info.span.end as u64,
+                kind,
+                mode,
+            ]
+            .hash(&mut hash);
+        }
         self.body.offset.hash(&mut hash);
         self.body.len.hash(&mut hash);
         self.contains_match.hash(&mut hash);
@@ -19,6 +41,7 @@ impl Tir {
         direct_catch.hash(&mut hash);
         self.extra.hash(&mut hash);
         for param in &self.params {
+            param.id.hash(&mut hash);
             param.name.hash(&mut hash);
             param.ty.hash(&mut hash);
             (param.mode as u8).hash(&mut hash);
@@ -34,7 +57,8 @@ impl Tir {
                 TirData::None => {}
                 TirData::Int(value) => value.hash(&mut hash),
                 TirData::Float(value) => value.to_bits().hash(&mut hash),
-                TirData::Str(id) | TirData::Var(id) => id.hash(&mut hash),
+                TirData::Str(id) => id.hash(&mut hash),
+                TirData::Var(id) => id.hash(&mut hash),
                 TirData::Bool(value) => value.hash(&mut hash),
                 TirData::UnOp(value) => value.hash(&mut hash),
                 TirData::BinOp { lhs, rhs } => (lhs, rhs).hash(&mut hash),

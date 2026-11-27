@@ -8,6 +8,86 @@ pub(super) fn all_borrow(args: &[TirRef]) -> Vec<ryo_core::tir::ParamMode> {
     vec![ryo_core::tir::ParamMode::Borrow; args.len()]
 }
 
+pub(super) fn test_declare(
+    builder: &mut ryo_core::tir::TirBuilder,
+    name: ryo_core::types::StringId,
+    ty: ryo_core::types::TypeId,
+    mutable: bool,
+) -> ryo_core::tir::BindingId {
+    builder.register_binding(ryo_core::tir::BindingInfo::new(
+        name,
+        ty,
+        ryo_core::tir::BindingKind::Local {
+            mutable,
+            borrowed: false,
+        },
+        ryo_core::tir::ScopeId::from_index(0),
+        ryo_core::span::Span::EMPTY,
+    ))
+}
+
+pub(super) fn test_binding(
+    builder: &mut ryo_core::tir::TirBuilder,
+    name: ryo_core::types::StringId,
+    ty: ryo_core::types::TypeId,
+) -> ryo_core::tir::BindingId {
+    if let Some((index, _)) = builder
+        .bindings()
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, info)| info.name == name)
+    {
+        return ryo_core::tir::BindingId::from_index(index);
+    }
+    test_declare(builder, name, ty, false)
+}
+
+pub(super) fn test_var(
+    builder: &mut ryo_core::tir::TirBuilder,
+    name: ryo_core::types::StringId,
+    ty: ryo_core::types::TypeId,
+    span: ryo_core::span::Span,
+) -> TirRef {
+    let id = test_binding(builder, name, ty);
+    builder.var(id, ty, span)
+}
+
+pub(super) fn test_var_decl(
+    builder: &mut ryo_core::tir::TirBuilder,
+    name: ryo_core::types::StringId,
+    mutable: bool,
+    ty: ryo_core::types::TypeId,
+    initializer: TirRef,
+    span: ryo_core::span::Span,
+) -> TirRef {
+    let id = test_declare(builder, name, ty, mutable);
+    builder.var_decl(id, mutable, ty, initializer, span)
+}
+
+pub(super) fn test_assign(
+    builder: &mut ryo_core::tir::TirBuilder,
+    name: ryo_core::types::StringId,
+    ty: ryo_core::types::TypeId,
+    value: TirRef,
+    span: ryo_core::span::Span,
+) -> TirRef {
+    let id = test_binding(builder, name, ty);
+    builder.assign(id, ty, value, span)
+}
+
+pub(super) fn test_for_range(
+    builder: &mut ryo_core::tir::TirBuilder,
+    id: ryo_core::tir::BindingId,
+    start: TirRef,
+    end: TirRef,
+    body: &[TirRef],
+    ty: ryo_core::types::TypeId,
+    span: ryo_core::span::Span,
+) -> TirRef {
+    builder.for_range(id, start, end, body, ty, span)
+}
+
 /// Positional replacement for the old name-keyed sidecar lookup:
 /// find `name`'s index in `tirs` and take that entry.
 /// Take the sidecar entry at `index`, positional with the `tirs`

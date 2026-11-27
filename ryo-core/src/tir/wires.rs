@@ -115,35 +115,28 @@ pub mod call_extra {
 /// Layout in `extra` for [`crate::tir::TirTag::VarDecl`]:
 ///
 /// ```text
-///   [0]  name:    StringId
+///   [0]  id:      BindingId
 ///   [1]  flags:   u32  (bit 0 = mutable)
 ///   [2]  init:    TirRef.raw()
 /// ```
 ///
-/// Unlike UIR's `VarDecl`, there is no `TY_NONE_SENTINEL`: the
-/// resolved variable type lives in the `TypedInst.ty` slot, never
-/// `Option`-shaped at this layer.
+/// The resolved variable type lives in the `TypedInst.ty` slot.
 pub mod var_decl_extra {
     use super::{extra_offset, len_u32};
     use crate::extra::ExtraRange;
-    use crate::tir::TirRef;
-    use crate::types::StringId;
+    use crate::tir::{BindingId, TirRef};
 
     pub const FLAG_MUTABLE: u32 = 1 << 0;
 
-    /// Decoded view of a [`crate::tir::TirTag::VarDecl`] payload.
     pub struct VarDeclView {
-        pub name: StringId,
+        pub id: BindingId,
         pub mutable: bool,
         pub initializer: TirRef,
     }
 
-    /// Encode a `VarDecl` header into `extra`, returning its range.
-    /// The resolved variable type travels in the `TypedInst.ty` slot,
-    /// never on the wire.
-    pub fn encode(extra: &mut Vec<u32>, name: StringId, mutable: bool, init: TirRef) -> ExtraRange {
+    pub fn encode(extra: &mut Vec<u32>, id: BindingId, mutable: bool, init: TirRef) -> ExtraRange {
         let offset = extra_offset(extra);
-        extra.push(name.raw());
+        extra.push(id.raw());
         extra.push(if mutable { FLAG_MUTABLE } else { 0 });
         extra.push(init.raw());
         ExtraRange {
@@ -152,15 +145,11 @@ pub mod var_decl_extra {
         }
     }
 
-    /// Decode a `VarDecl` header from its payload words.
     pub fn decode(words: &[u32]) -> VarDeclView {
-        let name = StringId::from_raw(words[0]);
-        let mutable = words[1] & FLAG_MUTABLE != 0;
-        let initializer = TirRef::from_raw(words[2]);
         VarDeclView {
-            name,
-            mutable,
-            initializer,
+            id: BindingId::from_index(words[0] as usize),
+            mutable: words[1] & FLAG_MUTABLE != 0,
+            initializer: TirRef::from_raw(words[2]),
         }
     }
 }
@@ -168,25 +157,22 @@ pub mod var_decl_extra {
 /// Layout in `extra` for [`crate::tir::TirTag::Assign`]:
 ///
 /// ```text
-///   [0]  name:  StringId
+///   [0]  id:    BindingId
 ///   [1]  value: TirRef.raw()
 /// ```
 pub mod assign_extra {
     use super::{extra_offset, len_u32};
     use crate::extra::ExtraRange;
-    use crate::tir::TirRef;
-    use crate::types::StringId;
+    use crate::tir::{BindingId, TirRef};
 
     pub struct AssignView {
-        pub name: StringId,
+        pub id: BindingId,
         pub value: TirRef,
     }
 
-    /// Encode an `Assign` payload into `extra`, returning its range.
-    /// The assigned type travels in the `TypedInst.ty` slot, not here.
-    pub fn encode(extra: &mut Vec<u32>, name: StringId, value: TirRef) -> ExtraRange {
+    pub fn encode(extra: &mut Vec<u32>, id: BindingId, value: TirRef) -> ExtraRange {
         let offset = extra_offset(extra);
-        extra.push(name.raw());
+        extra.push(id.raw());
         extra.push(value.raw());
         ExtraRange {
             offset,
@@ -194,10 +180,9 @@ pub mod assign_extra {
         }
     }
 
-    /// Decode an `Assign` payload from its words.
     pub fn decode(words: &[u32]) -> AssignView {
         AssignView {
-            name: StringId::from_raw(words[0]),
+            id: BindingId::from_index(words[0] as usize),
             value: TirRef::from_raw(words[1]),
         }
     }
@@ -206,7 +191,7 @@ pub mod assign_extra {
 /// Layout in `extra` for [`crate::tir::TirTag::CompoundAssign`]:
 ///
 /// ```text
-///   [0]  name:  StringId
+///   [0]  id:    BindingId
 ///   [1]  op:    u32 (CompoundOp discriminant)
 ///   [2]  value: TirRef.raw()
 /// ```
@@ -214,25 +199,22 @@ pub mod compound_assign_extra {
     use super::{extra_offset, len_u32};
     use crate::ast::CompoundOp;
     use crate::extra::ExtraRange;
-    use crate::tir::TirRef;
-    use crate::types::StringId;
+    use crate::tir::{BindingId, TirRef};
 
     pub struct CompoundAssignView {
-        pub name: StringId,
+        pub id: BindingId,
         pub op: CompoundOp,
         pub value: TirRef,
     }
 
-    /// Encode a `CompoundAssign` payload into `extra`, returning its
-    /// range. The assigned type travels in the `TypedInst.ty` slot.
     pub fn encode(
         extra: &mut Vec<u32>,
-        name: StringId,
+        id: BindingId,
         op: CompoundOp,
         value: TirRef,
     ) -> ExtraRange {
         let offset = extra_offset(extra);
-        extra.push(name.raw());
+        extra.push(id.raw());
         extra.push(op as u32);
         extra.push(value.raw());
         ExtraRange {
@@ -241,10 +223,9 @@ pub mod compound_assign_extra {
         }
     }
 
-    /// Decode a `CompoundAssign` payload from its words.
     pub fn decode(words: &[u32]) -> CompoundAssignView {
         CompoundAssignView {
-            name: StringId::from_raw(words[0]),
+            id: BindingId::from_index(words[0] as usize),
             op: CompoundOp::from_raw(words[1]),
             value: TirRef::from_raw(words[2]),
         }
@@ -292,7 +273,7 @@ pub mod while_loop_extra {
 /// Layout in `extra` for [`crate::tir::TirTag::ForRange`]:
 ///
 /// ```text
-///   [0]       var_name:   StringId
+///   [0]       id:         BindingId
 ///   [1]       start:      TirRef.raw()
 ///   [2]       end:        TirRef.raw()
 ///   [3]       body_count: u32
@@ -301,26 +282,24 @@ pub mod while_loop_extra {
 pub mod for_range_extra {
     use super::{extra_offset, len_u32};
     use crate::extra::{ExtraList, ExtraRange, ExtraValue};
-    use crate::tir::TirRef;
-    use crate::types::StringId;
+    use crate::tir::{BindingId, TirRef};
 
     pub struct ForRangeView<'a> {
-        pub var_name: StringId,
+        pub id: BindingId,
         pub start: TirRef,
         pub end: TirRef,
         pub body: ExtraList<'a, TirRef>,
     }
 
-    /// Encode a `ForRange` payload into `extra`, returning its range.
     pub fn encode(
         extra: &mut Vec<u32>,
-        var_name: StringId,
+        id: BindingId,
         start: TirRef,
         end: TirRef,
         body: &[TirRef],
     ) -> ExtraRange {
         let offset = extra_offset(extra);
-        extra.push(var_name.raw());
+        extra.push(id.raw());
         extra.push(start.raw());
         extra.push(end.raw());
         extra.push(len_u32(body.len()));
@@ -331,10 +310,9 @@ pub mod for_range_extra {
         }
     }
 
-    /// Decode a `ForRange` payload from its words.
     pub fn decode<'a>(words: &'a [u32]) -> ForRangeView<'a> {
         ForRangeView {
-            var_name: StringId::from_raw(words[0]),
+            id: BindingId::from_index(words[0] as usize),
             start: TirRef::from_raw(words[1]),
             end: TirRef::from_raw(words[2]),
             body: ExtraList::new(&words[4..]),

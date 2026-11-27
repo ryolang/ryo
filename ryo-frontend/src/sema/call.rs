@@ -401,10 +401,8 @@ pub(crate) fn borrow_target_reason(
             InstData::FieldAccess { object, .. } => root = object,
             InstData::Var(name) => {
                 return match scope.lookup_full(name) {
-                    Some((_, true)) => None, // mutable binding (mut local or inout param)
-                    Some((_, false)) => {
-                        Some(format!("`{}` is not declared `mut`", sema.pool.str(name)))
-                    }
+                    Some(binding) if binding.mutable => None,
+                    Some(_) => Some(format!("`{}` is not declared `mut`", sema.pool.str(name))),
                     None => Some(format!("`{}` is not defined", sema.pool.str(name))),
                 };
             }

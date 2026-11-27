@@ -215,7 +215,7 @@ fn outer() -> (A | B)!str:
     let local_init = refs()
         .find(|&r| {
             outer.inst(r).tag == ryo_core::tir::TirTag::VarDecl
-                && pool.str(outer.var_decl_view(r).name) == "local"
+                && pool.str(outer.binding_name(outer.var_decl_view(r).id)) == "local"
         })
         .map(|r| outer.var_decl_view(r).initializer)
         .expect("local initializer");

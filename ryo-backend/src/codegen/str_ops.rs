@@ -332,8 +332,8 @@ impl<M: Module> Codegen<M> {
             ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                 // A home-backed Var's inline bytes already sit in the
                 // home slot — extract against that address, no spill.
-                let inline_addr =
-                    Self::local_name_of(ctx, r).and_then(|n| Self::fat_home_addr(builder, ctx, n));
+                let inline_addr = Self::local_binding_of(ctx, r)
+                    .and_then(|n| Self::fat_home_addr(builder, ctx, n));
                 Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, inline_addr)
             }
             ValueRepr::View { ptr, len } => Ok((ptr, len)),

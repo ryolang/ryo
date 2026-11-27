@@ -46,7 +46,10 @@
 use ryo_core::compilation::CompilationContext;
 use ryo_core::declaration::{DeclId, DeclarationError};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirParam, TirRef};
+use ryo_core::tir::{
+    BindingId, BindingInfo, BindingKind, BindingTable, ParamMode, ScopeId, Tir, TirBuilder,
+    TirParam, TirRef,
+};
 use ryo_core::types::{InternPool, StringId, TypeId};
 use ryo_core::uir::{FuncBody, InstRef, InstTag, Span, Uir, UirBodyMap};
 use std::collections::{HashMap, HashSet};
@@ -135,6 +138,7 @@ impl TypeNames {
 }
 
 struct Binding {
+    id: BindingId,
     ty: TypeId,
     mutable: bool,
     /// True when the binding names a parameter declared with the
@@ -147,6 +151,12 @@ struct Binding {
     used: std::cell::Cell<bool>,
     dead_store_span: Option<Span>,
     dead_store_help: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+struct TempBinding {
+    id: BindingId,
+    ty: TypeId,
 }
 
 pub(crate) enum ScopeParent<'a> {
@@ -170,22 +180,32 @@ impl<'a> From<&'a Scope<'a>> for ScopeParent<'a> {
 }
 
 pub(crate) struct Scope<'a> {
+    id: ScopeId,
     parent: Option<ScopeParent<'a>>,
     bindings: HashMap<StringId, Binding>,
 }
 
 impl<'a> Scope<'a> {
-    fn new() -> Self {
+    fn new(id: ScopeId) -> Self {
         Scope {
+            id,
             parent: None,
             bindings: HashMap::new(),
         }
     }
 
-    fn insert_binding(&mut self, name: StringId, ty: TypeId, mutable: bool, borrowed: bool) {
+    fn insert_binding_with_id(
+        &mut self,
+        id: BindingId,
+        name: StringId,
+        ty: TypeId,
+        mutable: bool,
+        borrowed: bool,
+    ) {
         self.bindings.insert(
             name,
             Binding {
+                id,
                 ty,
                 mutable,
                 borrowed,
@@ -196,25 +216,54 @@ impl<'a> Scope<'a> {
         );
     }
 
-    fn insert_dead_store_binding(
+    fn insert_binding(
         &mut self,
+        fcx: &mut FuncCtx,
         name: StringId,
         ty: TypeId,
         mutable: bool,
         borrowed: bool,
         span: Span,
-    ) {
-        self.insert_binding(name, ty, mutable, borrowed);
+    ) -> BindingId {
+        let id = fcx.register_binding(
+            name,
+            ty,
+            BindingKind::Local { mutable, borrowed },
+            self.id,
+            span,
+        );
+        self.insert_binding_with_id(id, name, ty, mutable, borrowed);
+        id
+    }
+
+    fn insert_dead_store_binding(
+        &mut self,
+        fcx: &mut FuncCtx,
+        name: StringId,
+        ty: TypeId,
+        mutable: bool,
+        borrowed: bool,
+        span: Span,
+    ) -> BindingId {
+        let id = self.insert_binding(fcx, name, ty, mutable, borrowed, span);
         if let Some(binding) = self.bindings.get_mut(&name) {
             binding.dead_store_span = Some(span);
         }
+        id
     }
 
-    fn insert_direct_catch_binding(&mut self, name: StringId, ty: TypeId, span: Span) {
-        self.insert_dead_store_binding(name, ty, false, false, span);
+    fn insert_direct_catch_binding(
+        &mut self,
+        fcx: &mut FuncCtx,
+        name: StringId,
+        ty: TypeId,
+        span: Span,
+    ) -> BindingId {
+        let id = self.insert_dead_store_binding(fcx, name, ty, false, false, span);
         if let Some(binding) = self.bindings.get_mut(&name) {
             binding.dead_store_help = Some("if no arm needs the shared error, write bare `catch:`");
         }
+        id
     }
 
     fn drain_dead_stores(&self, sema: &mut Sema<'_>) {
@@ -250,19 +299,18 @@ impl<'a> Scope<'a> {
         self.bindings.contains_key(&name)
     }
 
-    fn lookup(&self, name: StringId) -> Option<TypeId> {
+    fn lookup(&self, name: StringId) -> Option<&Binding> {
         if let Some(binding) = self.bindings.get(&name) {
             binding.used.set(true);
-            Some(binding.ty)
+            Some(binding)
         } else {
             self.parent.as_ref()?.scope().lookup(name)
         }
     }
 
-    fn lookup_full(&self, name: StringId) -> Option<(TypeId, bool)> {
+    fn lookup_full(&self, name: StringId) -> Option<&Binding> {
         self.bindings
             .get(&name)
-            .map(|b| (b.ty, b.mutable))
             .or_else(|| self.parent.as_ref()?.scope().lookup_full(name))
     }
 
@@ -787,7 +835,17 @@ fn analyze_function(
     body: &FuncBody,
     signature: &FunctionSig,
 ) -> Tir {
-    let mut scope = Scope::new();
+    let body_index = sema.body_index(decl);
+    let instruction_count = sema.body_map().instructions(body_index).len();
+    let mut fcx = FuncCtx::new(
+        decl,
+        u32::try_from(body_index).expect("UIR body index out of range"),
+        TirBuilder::new(body.name, Vec::new(), signature.return_type, body.span)
+            .with_decl(decl)
+            .with_layout_context(sema.pool),
+        instruction_count,
+    );
+    let mut scope = Scope::new(fcx.next_scope());
     for (param, &param_type) in body.params.iter().zip(&signature.params) {
         // An `inout` parameter is mutable inside the callee body (like a
         // `mut` local); `move` and borrowed params are immutable.
@@ -795,24 +853,33 @@ fn analyze_function(
         // Parameters are a user binding form like any other: the
         // '__ryo_' prefix and reserved builtins are rejected here too
         // (the error-typed binding keeps the body's uses suppressed).
-        if check_reserved_name(
+        let reserved = check_reserved_name(
             sema,
             param.name,
             param.span,
             "is a reserved builtin and cannot be used as a parameter name",
-        ) {
-            scope.insert_binding(param.name, sema.pool.error_type(), is_mutable, false);
-            continue;
-        }
-        // The default mode is `Borrow`: such a parameter is a borrowed
-        // binding, which sema's match scrutinee analysis reads back via
-        // `Scope::lookup_borrowed` (E0133's borrowed-scrutinee gate).
-        scope.insert_binding(
-            param.name,
-            param_type,
-            is_mutable,
-            param.mode == ParamMode::Borrow,
         );
+        let binding_type = if reserved {
+            sema.pool.error_type()
+        } else {
+            param_type
+        };
+        let borrowed = !reserved && param.mode == ParamMode::Borrow;
+        let id = fcx.register_binding(
+            param.name,
+            binding_type,
+            BindingKind::Param(param.mode),
+            scope.id,
+            param.span,
+        );
+        scope.insert_binding_with_id(id, param.name, binding_type, is_mutable, borrowed);
+        fcx.builder.push_param(TirParam::new(
+            id,
+            param.name,
+            binding_type,
+            param.mode,
+            param.span,
+        ));
     }
 
     // W0002: warn on `move` annotations applied to Copy-typed
@@ -870,29 +937,6 @@ fn analyze_function(
         ));
     }
 
-    let params: Vec<TirParam> = body
-        .params
-        .iter()
-        .zip(&signature.params)
-        .map(|(param, &ty)| TirParam {
-            name: param.name,
-            ty,
-            mode: param.mode,
-            span: param.span,
-        })
-        .collect();
-
-    let body_index = sema.body_index(decl);
-    let instruction_count = sema.body_map().instructions(body_index).len();
-    let mut fcx = FuncCtx::new(
-        decl,
-        u32::try_from(body_index).expect("UIR body index out of range"),
-        TirBuilder::new(body.name, params, signature.return_type, body.span)
-            .with_decl(decl)
-            .with_layout_context(sema.pool),
-        instruction_count,
-    );
-
     let uir = sema.uir;
     let body_stmts = uir.body_stmts(body);
     let mut stmt_refs: Vec<TirRef> = Vec::with_capacity(body_stmts.len());
@@ -915,11 +959,13 @@ pub(crate) struct FuncCtx {
     chain_local_errors: Vec<InstRef>,
     return_type: TypeId,
     loop_depth: u32,
+    next_binding: u32,
+    next_scope: u32,
     /// Compiler-temp bindings synthesized by astgen for nested
     /// destructuring and catch lowering. Kept OUT of the user scope:
     /// user code can never collide with or observe them, and `TempVar`
     /// reads resolve them before any scope lookup.
-    destructure_temps: HashMap<StringId, TypeId>,
+    destructure_temps: HashMap<StringId, TempBinding>,
     inferred_call_dependencies: HashMap<TirRef, DeclId>,
     variant_states: Vec<expr::walker::VariantState>,
 }
@@ -932,6 +978,8 @@ impl FuncCtx {
         instruction_count: usize,
     ) -> Self {
         let return_type = builder.return_type();
+        let next_binding = u32::try_from(builder.bindings().len())
+            .expect("binding table exceeds the body-local ID space");
         Self {
             decl,
             body,
@@ -940,10 +988,61 @@ impl FuncCtx {
             chain_local_errors: Vec::new(),
             return_type,
             loop_depth: 0,
+            next_binding,
+            next_scope: 0,
             destructure_temps: HashMap::new(),
             inferred_call_dependencies: HashMap::new(),
             variant_states: Vec::new(),
         }
+    }
+
+    pub(crate) fn next_binding(&mut self) -> BindingId {
+        let id = BindingId::from_index(self.next_binding as usize);
+        self.next_binding = self
+            .next_binding
+            .checked_add(1)
+            .expect("binding ID space exhausted");
+        id
+    }
+
+    pub(crate) fn binding_table(&self) -> &BindingTable {
+        self.builder.bindings()
+    }
+
+    pub(crate) fn next_scope(&mut self) -> ScopeId {
+        let id = ScopeId::from_index(self.next_scope as usize);
+        self.next_scope = self
+            .next_scope
+            .checked_add(1)
+            .expect("scope ID space exhausted");
+        id
+    }
+
+    pub(crate) fn register_binding(
+        &mut self,
+        name: StringId,
+        ty: TypeId,
+        kind: BindingKind,
+        scope: ScopeId,
+        span: Span,
+    ) -> BindingId {
+        let id = self.next_binding();
+        assert_eq!(id.index(), self.binding_table().len());
+        let registered = self
+            .builder
+            .register_binding(BindingInfo::new(name, ty, kind, scope, span));
+        debug_assert_eq!(id, registered);
+        id
+    }
+
+    fn insert_temp(&mut self, name: StringId, ty: TypeId, scope: ScopeId, span: Span) -> BindingId {
+        let id = self.register_binding(name, ty, BindingKind::Temporary, scope, span);
+        self.insert_temp_with_id(id, name, ty);
+        id
+    }
+
+    fn insert_temp_with_id(&mut self, id: BindingId, name: StringId, ty: TypeId) {
+        self.destructure_temps.insert(name, TempBinding { id, ty });
     }
 
     pub(crate) fn map_slot(&self, map: &UirBodyMap, inst: InstRef) -> usize {

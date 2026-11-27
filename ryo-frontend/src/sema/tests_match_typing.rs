@@ -5,9 +5,9 @@
 //! the match-view helpers come from `tests_match.rs` (pub(super)).
 
 use super::tests::*;
-use super::tests_match::{match_in_var_init, match_stmt_operand};
+use super::tests_match::{assert_bindings, match_in_var_init, match_stmt_operand};
 use super::*;
-use ryo_core::tir::{Discriminant, MatchBinding, MatchBodyView, TirData, TirRef, TirTag};
+use ryo_core::tir::{Discriminant, MatchBodyView, TirData, TirRef, TirTag};
 
 // ---------- Arm typing (E0133-E0135) + typed TIR Match ----------
 
@@ -34,14 +34,10 @@ fn value_join_emits_typed_match_with_arm_bindings() {
     assert_eq!(view.arm(0).discriminant, Discriminant::Variant(0));
     assert_eq!(view.arm(1).discriminant, Discriminant::Variant(1));
     let v = pool.find_str("v").expect("`v` interned");
-    assert_eq!(
+    assert_bindings(
+        main,
         view.arm(0).bindings().collect::<Vec<_>>(),
-        [MatchBinding {
-            field_index: 0,
-            name: v,
-            ty: pool.int(),
-        }],
-        "arm 0 binds field 0 as `v: int`"
+        &[(0, v, pool.int())],
     );
     assert_eq!(view.arm(1).binding_count(), 0);
     let MatchBodyView::Expr(arm0_body) = view.arm(0).body else {
@@ -503,16 +499,27 @@ fn same_binding_name_in_different_arms_is_allowed() {
     let m = match_in_var_init(main, 1);
     let view = main.match_view(m);
     let v = pool.find_str("v").expect("`v` interned");
+    let mut ids = Vec::new();
     for arm in view.arms() {
-        assert_eq!(
-            arm.bindings().collect::<Vec<_>>(),
-            [MatchBinding {
-                field_index: 0,
-                name: v,
-                ty: pool.int(),
-            }]
-        );
+        let bindings = arm.bindings().collect::<Vec<_>>();
+        assert_bindings(main, bindings.clone(), &[(0, v, pool.int())]);
+        let binding = bindings[0];
+        ids.push(binding.id);
+        let MatchBodyView::Expr(body) = arm.body else {
+            panic!("fixture arms must be expressions")
+        };
+        let body_read = match main.inst(body).data {
+            TirData::Var(id) => id,
+            TirData::BinOp { lhs, .. } => match main.inst(lhs).data {
+                TirData::Var(id) => id,
+                other => panic!("arm lhs must read its own binding, got {other:?}"),
+            },
+            other => panic!("arm body must read its own binding, got {other:?}"),
+        };
+        assert_eq!(body_read, binding.id, "arm body read must use its own ID");
     }
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1], "same-spelled arm IDs must be distinct");
 }
 
 #[test]
@@ -567,28 +574,15 @@ fn owner_tokens_follow_arm_then_binding_order() {
     let b = pool.find_str("b").unwrap();
     let s = pool.find_str("s").unwrap();
     let view = main.match_view(m);
-    assert_eq!(
+    assert_bindings(
+        main,
         view.arm(0).bindings().collect::<Vec<_>>(),
-        [
-            MatchBinding {
-                field_index: 0,
-                name: a,
-                ty: pool.str_(),
-            },
-            MatchBinding {
-                field_index: 1,
-                name: b,
-                ty: pool.str_(),
-            },
-        ]
+        &[(0, a, pool.str_()), (1, b, pool.str_())],
     );
-    assert_eq!(
+    assert_bindings(
+        main,
         view.arm(1).bindings().collect::<Vec<_>>(),
-        [MatchBinding {
-            field_index: 0,
-            name: s,
-            ty: pool.str_(),
-        }]
+        &[(0, s, pool.str_())],
     );
 }
 
@@ -643,13 +637,10 @@ fn anon_arm_encodes_placeholder_wildcard_discriminant() {
         Discriminant::Wildcard,
         "anon arms encode the Wildcard placeholder"
     );
-    assert_eq!(
+    assert_bindings(
+        main,
         view.arm(0).bindings().collect::<Vec<_>>(),
-        [MatchBinding {
-            field_index: 0,
-            name: px,
-            ty: pool.int(),
-        }]
+        &[(0, px, pool.int())],
     );
     assert_eq!(view.arm(1).discriminant, Discriminant::Wildcard);
     assert_eq!(view.arm(1).binding_count(), 0);

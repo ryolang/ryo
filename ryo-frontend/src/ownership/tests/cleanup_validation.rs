@@ -242,13 +242,11 @@ fn validator_rejects_distinct_targets_aliasing_one_place_at_one_position() {
     );
 }
 
-/// Positive pin (duplicates): the ownership pass's deliberate
-/// double-anchor (consumer + return epilogue naming the SAME target at
-/// the SAME position) is deduped by codegen's per-bucket `freed_targets`
-/// check — `codegen/frees.rs` documents it as a no-op by design, so the
-/// validator must accept it. Fixture: an unconsumed move param — the
-/// param policy Free and the return epilogue both anchor after the
-/// return statement.
+/// Positive pin (duplicates): a same-target double-anchor is deduped by
+/// codegen's per-bucket `freed_targets` check — `codegen/frees.rs`
+/// documents it as a no-op by design, so the validator must accept it.
+/// Inject the pair explicitly; the production scheduler need not emit
+/// redundant drops for this validator contract to hold.
 #[test]
 fn validator_accepts_same_target_double_anchor_by_design() {
     use ryo_core::span::Span;
@@ -262,6 +260,7 @@ fn validator_accepts_same_target_double_anchor_by_design() {
     let mut tb = TirBuilder::new(
         consume,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s_name,
             ty: str_ty,
             mode: ParamMode::Move,
@@ -283,9 +282,13 @@ fn validator_accepts_same_target_double_anchor_by_design() {
     assert_eq!(diags.len(), 1, "got {diags:?}");
     assert_eq!(diags[0].code, DiagCode::DeadStore);
     assert_eq!(diags[0].message, "value `s` is declared but never used");
-    let sc = take_function_sidecar(&mut sidecar, 0);
-    // The fixture's whole point: the schedule really does contain the
-    // same-target same-position pair.
+    let mut sc = take_function_sidecar(&mut sidecar, 0);
+    let param_drop = *sc
+        .drops
+        .iter()
+        .find(|drop| drop.target == ryo_core::tir::TirRef::param(0))
+        .expect("unconsumed move parameter cleanup");
+    sc.drops.push(param_drop);
     let anchors: Vec<_> = sc
         .drops
         .iter()
@@ -917,9 +920,8 @@ fn path_checks_accept_sibling_arm_drops() {
     run_path_checks(&tirs, &pool, &flow, &own, &sc, false);
 }
 
-/// Positive pin: the designed same-target double-anchor (consumer +
-/// return epilogue at the same position) is not flagged by the path
-/// checks.
+/// Positive pin: an injected same-target double-anchor is not flagged
+/// by the path checks.
 #[test]
 fn path_checks_accept_by_design_double_anchor() {
     use ryo_core::span::Span;
@@ -933,6 +935,7 @@ fn path_checks_accept_by_design_double_anchor() {
     let mut tb = TirBuilder::new(
         consume,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s_name,
             ty: str_ty,
             mode: ParamMode::Move,
@@ -951,7 +954,13 @@ fn path_checks_accept_by_design_double_anchor() {
     assert_eq!(diags[0].code, DiagCode::DeadStore);
     assert_eq!(diags[0].message, "value `s` is declared but never used");
     let own = cv::take_test_ownership(tir.name).expect("captured ownership");
-    let sc = take_function_sidecar(&mut sidecar, 0);
+    let mut sc = take_function_sidecar(&mut sidecar, 0);
+    let param_drop = *sc
+        .drops
+        .iter()
+        .find(|drop| drop.target == ryo_core::tir::TirRef::param(0))
+        .expect("unconsumed move parameter cleanup");
+    sc.drops.push(param_drop);
     let flow = build_flow(&tir, &pool);
     run_path_checks(std::slice::from_ref(&tir), &pool, &flow, &own, &sc, false);
 }

@@ -7,6 +7,7 @@
 
 use super::tests::*;
 use super::*;
+use ryo_core::tir::{TirData, TirTag};
 
 #[test]
 fn inout_param_is_assignable() {
@@ -234,4 +235,36 @@ fn str_push_valid_still_ok() {
         "str_push(&s, \"x\") must stay valid; got {:?}",
         diags
     );
+}
+
+#[test]
+fn inout_arguments_use_each_shadows_resolved_binding_id() {
+    let src = "fn bump(inout value: int):\n\tvalue += 1\n\nfn main():\n\tmut value = 1\n\tif true:\n\t\tmut value = 2\n\t\tbump(&value)\n\tbump(&value)\n";
+    let (tirs, pool) = run(src).unwrap();
+    let main = tir_named(&tirs, &pool, "main");
+    let declarations = (1..main.instructions.len())
+        .filter_map(|index| {
+            let reference = TirRef::from_raw(index as u32);
+            (main.inst(reference).tag == TirTag::VarDecl).then(|| main.var_decl_view(reference))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 2);
+    let bump = pool.find_str("bump").expect("bump interned");
+    let arguments = (1..main.instructions.len())
+        .filter_map(|index| {
+            let reference = TirRef::from_raw(index as u32);
+            (main.inst(reference).tag == TirTag::Call).then_some(reference)
+        })
+        .filter(|reference| main.call_view(*reference).name == bump)
+        .map(|reference| {
+            let call = main.call_view(reference);
+            assert_eq!(call.modes.at(0), ParamMode::Inout);
+            match main.inst(call.args.at(0)).data {
+                TirData::Var(id) => id,
+                other => panic!("inout argument must be a direct binding read: {other:?}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(arguments, vec![declarations[1].id, declarations[0].id]);
+    assert_ne!(declarations[0].id, declarations[1].id);
 }

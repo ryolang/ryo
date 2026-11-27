@@ -41,29 +41,43 @@ fn analyze(
     ryo_core::ownership::OwnershipSidecar,
     ryo_core::compilation::CompilationContext,
 ) {
+    let mut pool = InternPool::new();
+    let (tirs, flows, sidecar, context) = analyze_using_pool(src, &mut pool);
+    (tirs, flows, pool, sidecar, context)
+}
+
+fn analyze_using_pool(
+    src: &str,
+    pool: &mut InternPool,
+) -> (
+    Vec<Tir>,
+    Vec<ryo_core::flow::Flow>,
+    ryo_core::ownership::OwnershipSidecar,
+    ryo_core::compilation::CompilationContext,
+) {
     let mut context = ryo_core::compilation::CompilationContext::new();
     let source_id = context.register_source(std::path::PathBuf::from("test.ryo"), src.into());
     let source = context
         .sources()
         .get(source_id)
         .expect("test source must resolve");
-    let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
-    let tokens = ryo_frontend::lexer::lex(source, &mut pool, &mut sink);
+    let tokens = ryo_frontend::lexer::lex(source, pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
     let token_stream = tokens[..].split_token_span(ryo_frontend::lexer::eoi(source_id, src.len()));
-    let mut state = ParseState::with_source(pool, source_id);
+    let mut state = ParseState::with_source(std::mem::replace(pool, InternPool::new()), source_id);
     ryo_frontend::grammar::program_parser()
         .parse_with_state(token_stream, &mut state)
         .into_result()
         .expect("parse should succeed");
-    let (ast, mut pool) = state.into_parts();
+    let (ast, parsed_pool) = state.into_parts();
+    *pool = parsed_pool;
     let mut astgen_sink = ryo_core::diag::DiagSink::new();
-    let uir = ryo_frontend::astgen::generate(&ast, &mut pool, &mut astgen_sink);
+    let uir = ryo_frontend::astgen::generate(&ast, pool, &mut astgen_sink);
     let mut sema_sink = ryo_core::diag::DiagSink::new();
     let tirs = ryo_frontend::sema::analyze(
         &uir,
-        &mut pool,
+        pool,
         &mut sema_sink,
         src,
         std::path::Path::new("test.ryo"),
@@ -72,12 +86,12 @@ fn analyze(
     assert!(!sema_sink.has_errors(), "sema should succeed");
     let flows: Vec<ryo_core::flow::Flow> = tirs
         .iter()
-        .map(|t| ryo_core::flow::Flow::build(t, &pool))
+        .map(|t| ryo_core::flow::Flow::build(t, pool))
         .collect();
     let mut ownership_sink = ryo_core::diag::DiagSink::new();
-    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut ownership_sink);
+    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, pool, &mut ownership_sink);
     assert!(!ownership_sink.has_errors(), "ownership should succeed");
-    (tirs, flows, pool, sidecar, context)
+    (tirs, flows, sidecar, context)
 }
 
 /// (a) `EnumLit` emits an i32 tag store at offset 0 followed by
@@ -382,8 +396,8 @@ fn cleanup_executes_without_optional_optimizations() {
 
 #[test]
 fn cleanup_rejects_physical_storage_of_another_binding() {
-    let expected = TirRef::from_raw(1);
-    let wrong = TirRef::from_raw(2);
+    let expected = BindingId::from_index(0);
+    let wrong = BindingId::from_index(1);
     let var = Variable::from_u32(0);
     let storage = FatLocals {
         binding: Some(wrong),
@@ -420,6 +434,125 @@ fn mixed_abi_emits_objects_for_supported_target_layouts() {
             .expect("target ABI emission");
         assert!(!codegen.finish().expect("object").is_empty());
     }
+}
+
+#[test]
+fn backend_rejects_cross_body_binding_id() {
+    let source = "fn main():\n\tvalue = 1\n\tprint(value)\n";
+    let (tirs, flows, mut pool, cleanup, _context) = analyze(source);
+    let (other_tirs, other_flows, _other_cleanup, _other_context) =
+        analyze_using_pool(source, &mut pool);
+    let binding = tirs[0]
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, inst)| inst.tag == TirTag::VarDecl)
+        .map(|(index, _)| tirs[0].var_decl_view(TirRef::from_raw(index as u32)).id)
+        .expect("source binding");
+    let other_binding = other_tirs[0]
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, inst)| inst.tag == TirTag::VarDecl)
+        .map(|(index, _)| {
+            other_tirs[0]
+                .var_decl_view(TirRef::from_raw(index as u32))
+                .id
+        })
+        .expect("other source binding");
+    assert_eq!(binding, other_binding, "body-local IDs have the same shape");
+    assert_ne!(tirs[0].identity(), other_tirs[0].identity());
+
+    let error = Codegen::new_jit()
+        .expect("JIT")
+        .compile(&tirs, &other_flows, &pool, &cleanup, false)
+        .expect_err("an in-range ID from another body must fail publication");
+    assert!(
+        error.contains("backend binding validation") && error.contains("different typed body"),
+        "{error}"
+    );
+    drop(flows);
+}
+
+#[test]
+fn backend_rejects_out_of_scope_binding_use() {
+    let source =
+        "fn main():\n\tif true:\n\t\tvalue = 1\n\t\tprint(value)\n\tvalue = 2\n\tprint(value)\n";
+    let (mut tirs, flows, pool, cleanup, _context) = analyze(source);
+    let declarations: Vec<_> = tirs[0]
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, inst)| inst.tag == TirTag::VarDecl)
+        .map(|(index, _)| tirs[0].var_decl_view(TirRef::from_raw(index as u32)).id)
+        .collect();
+    assert_eq!(declarations.len(), 2);
+    assert_ne!(declarations[0], declarations[1]);
+    assert_eq!(
+        tirs[0].binding_name(declarations[0]),
+        tirs[0].binding_name(declarations[1]),
+        "source spelling must not distinguish the fixture bindings"
+    );
+    let outer_read = tirs[0]
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, inst)| match inst.data {
+            TirData::Var(id) if id == declarations[1] => Some(index),
+            _ => None,
+        })
+        .expect("outer binding read");
+    tirs[0].instructions[outer_read].data = TirData::Var(declarations[0]);
+
+    let error = Codegen::new_jit()
+        .expect("JIT")
+        .compile(&tirs, &flows, &pool, &cleanup, false)
+        .expect_err("an out-of-scope binding must fail before emission");
+    assert!(
+        error.contains("backend binding validation") && error.contains("outside binding scope"),
+        "{error}"
+    );
+}
+
+#[test]
+fn match_arm_indented_locals_use_the_arm_structural_scope() {
+    assert_jit_succeeds(
+        "struct Msg:\n\ttext: str\n\nenum Note:\n\tInfo(Msg)\n\tBlank\n\nfn main():\n\tn = Note.Info(Msg{text=\"hello\"})\n\tmatch n:\n\t\tNote.Info(msg):\n\t\t\tx = 1\n\t\t\tprint(msg.text)\n\t\t\tprint(x)\n\t\tNote.Blank:\n\t\t\tprint(0)\n",
+    );
+}
+
+#[test]
+fn backend_and_flow_reject_foreign_pool_before_match_payload_inspection() {
+    let source = "struct Msg:\n\ttext: str\n\nenum Note:\n\tInfo(Msg)\n\tBlank\n\nfn main():\n\tn = Note.Info(Msg{text=\"hello\"})\n\tmatch n:\n\t\tNote.Info(m): print(m.text)\n\t\tNote.Blank: print(\"\")\n";
+    let (tirs, flows, _pool, cleanup, _context) = analyze(source);
+    assert!(
+        flows[0]
+            .places
+            .iter()
+            .any(|place| matches!(place, ryo_core::flow::Place::Token { .. })),
+        "fixture must contain a non-Copy match payload token"
+    );
+    let foreign = InternPool::new();
+
+    let error = Codegen::new_jit()
+        .expect("JIT")
+        .compile(&tirs, &flows, &foreign, &cleanup, false)
+        .expect_err("a foreign pool must be rejected before backend emission");
+    assert!(
+        error.contains("different type and layout context"),
+        "{error}"
+    );
+
+    let error = ryo_core::flow::Flow::try_build(&tirs[0], &foreign)
+        .expect_err("Flow construction must reject a foreign pool");
+    assert!(
+        error.contains("different type and layout context"),
+        "{error}"
+    );
 }
 
 #[test]

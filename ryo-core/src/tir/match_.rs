@@ -63,7 +63,7 @@
 //! ([`EnumLitView`][crate::tir::EnumLitView] precedent), and
 //! [`MatchBodyView::Stmts`] is the stmt-refs slice itself.
 
-use super::{ChildKind, ExtraRange, Span, Tir, TirBuilder, TirData, TirRef, TirTag};
+use super::{BindingId, ChildKind, ExtraRange, Span, Tir, TirBuilder, TirData, TirRef, TirTag};
 use crate::ast::LitPattern;
 use crate::types::{InternPool, StringId, TypeId};
 
@@ -156,7 +156,7 @@ pub enum Discriminant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchBinding {
     pub field_index: u32,
-    pub name: StringId,
+    pub id: BindingId,
     pub ty: TypeId,
 }
 
@@ -256,8 +256,7 @@ impl<'a> MatchView<'a> {
 pub struct MatchArmView<'a> {
     pub span: Span,
     pub discriminant: Discriminant,
-    /// `3 * binding_count` binding words (`field_index, name, ty`
-    /// triples).
+    /// `3 * binding_count` binding words (`field_index, id, ty` triples).
     bindings: &'a [u32],
     /// The guard words after the consumed `guard_count` word —
     /// variable-length `(field_index, kind, payload…)` records, walked
@@ -305,7 +304,7 @@ impl<'a> MatchArmView<'a> {
 
 /// Iterator over one arm's decoded [`MatchBinding`]s; see
 /// [`MatchArmView::bindings`]. Wraps the borrowed binding words and
-/// materializes each `(field_index, name, ty)` triple on demand.
+/// materializes each `(field_index, id, ty)` triple on demand.
 pub struct MatchBindingsIter<'a> {
     chunks: std::slice::Iter<'a, [u32; match_extra::BINDING_LEN]>,
 }
@@ -314,10 +313,10 @@ impl Iterator for MatchBindingsIter<'_> {
     type Item = MatchBinding;
 
     fn next(&mut self) -> Option<MatchBinding> {
-        let &[field_index, name, ty] = self.chunks.next()?;
+        let &[field_index, id, ty] = self.chunks.next()?;
         Some(MatchBinding {
             field_index,
-            name: StringId::from_raw(name),
+            id: BindingId::from_index(id as usize),
             ty: TypeId::from_raw(ty),
         })
     }
@@ -466,7 +465,7 @@ impl TirBuilder {
             self.extra.push(Self::len_u32(arm.bindings.len()));
             for b in arm.bindings {
                 self.extra.push(b.field_index);
-                self.extra.push(b.name.raw());
+                self.extra.push(b.id.raw());
                 self.extra.push(b.ty.raw());
             }
             self.extra.push(Self::len_u32(arm.guards.len()));
@@ -562,38 +561,9 @@ impl Tir {
     /// fields; codegen's free-path redirect maps them to the bindings'
     /// slots.
     pub fn match_by_move_owner_refs(&self, r: TirRef, pool: &InternPool) -> Vec<TirRef> {
-        let view = self.match_view(r);
-        let n_moves = view
-            .arms()
-            .flat_map(|arm| arm.bindings())
-            .filter(|b| !pool.is_copy(b.ty))
-            .count();
-        debug_assert!(
-            n_moves <= r.index(),
-            "match owner tokens precede the instruction"
-        );
-        let mut cursor = r.index() - n_moves;
-        let mut out = Vec::with_capacity(n_moves);
-        for arm in view.arms() {
-            for b in arm.bindings() {
-                if pool.is_copy(b.ty) {
-                    continue;
-                }
-                let owner = TirRef::from_index(cursor);
-                cursor += 1;
-                debug_assert!(
-                    matches!(self.inst(owner).tag, TirTag::FieldAccess),
-                    "match owner token must be a FieldAccess"
-                );
-                debug_assert_eq!(
-                    self.inst(owner).ty,
-                    b.ty,
-                    "match owner token carries the binding type"
-                );
-                out.push(owner);
-            }
-        }
-        out
+        self.match_owner_tokens(r, pool)
+            .map(|tokens| tokens.iter().map(|token| token.owner).collect())
+            .expect("valid match owner tokens")
     }
 
     /// The per-body memo backing [`Tir::subtree_has_match`]: slot `i` is
@@ -740,6 +710,7 @@ fn decode_match_arm(slice: &[u32]) -> MatchArmView<'_> {
 mod tests {
     use super::*;
     use crate::tir::ChildKind;
+    use crate::tir::test_bindings::*;
 
     fn sp() -> Span {
         Span::EMPTY
@@ -816,18 +787,18 @@ mod tests {
         let w = pool.intern_str("w");
 
         let mut b = TirBuilder::new(main, vec![], int_ty, sp());
-        let scrut = b.var(shape, int_ty, sp());
+        let scrut = var(&mut b, shape, int_ty, sp());
         let s1 = b.int_const(1, int_ty, sp());
         let s2 = b.int_const(2, int_ty, sp());
         let bindings = [
             MatchBinding {
                 field_index: 0,
-                name: v,
+                id: declare(&mut b, v, str_ty, false),
                 ty: str_ty,
             },
             MatchBinding {
                 field_index: 1,
-                name: w,
+                id: declare(&mut b, w, int_ty, false),
                 ty: int_ty,
             },
         ];
@@ -853,21 +824,7 @@ mod tests {
         let arm = view.arm(0);
         assert_eq!(arm.discriminant, Discriminant::Variant(1));
         assert_eq!(arm.binding_count(), 2);
-        assert_eq!(
-            arm.bindings().collect::<Vec<_>>(),
-            [
-                MatchBinding {
-                    field_index: 0,
-                    name: v,
-                    ty: str_ty
-                },
-                MatchBinding {
-                    field_index: 1,
-                    name: w,
-                    ty: int_ty
-                }
-            ]
-        );
+        assert_eq!(arm.bindings().collect::<Vec<_>>(), bindings);
         let MatchBodyView::Stmts(words) = arm.body else {
             panic!("expected stmts body, got {:?}", arm.body);
         };
@@ -961,7 +918,7 @@ mod tests {
         let stmt = b.return_void(pool.void(), sp());
         let bindings = [MatchBinding {
             field_index: 0,
-            name: v,
+            id: declare(&mut b, v, str_ty, false),
             ty: str_ty,
         }];
         let guards = [(0, LitPattern::Int(-7))];
@@ -1005,7 +962,7 @@ mod tests {
         let px = pool.intern_str("px");
 
         let mut b = TirBuilder::new(main, vec![], int_ty, sp());
-        let scrut = b.var(main, int_ty, sp());
+        let scrut = var(&mut b, main, int_ty, sp());
         let body = b.int_const(1, int_ty, sp());
         let fallback = b.int_const(0, int_ty, sp());
         let guards = [
@@ -1015,7 +972,7 @@ mod tests {
         ];
         let anon_bindings = [MatchBinding {
             field_index: 3,
-            name: px,
+            id: declare(&mut b, px, int_ty, false),
             ty: int_ty,
         }];
         let m = b.match_expr(
@@ -1055,11 +1012,7 @@ mod tests {
         );
         assert_eq!(
             arm0.bindings().collect::<Vec<_>>(),
-            [MatchBinding {
-                field_index: 3,
-                name: px,
-                ty: int_ty
-            }],
+            anon_bindings,
             "bindings and guards coexist on one arm"
         );
         // The non-anon arm decodes an empty guard list.
@@ -1114,7 +1067,7 @@ mod tests {
         let e3 = b.int_const(3, int_ty, sp());
         let binding = [MatchBinding {
             field_index: 0,
-            name: v,
+            id: declare(&mut b, v, str_ty, false),
             ty: str_ty,
         }];
         let m2 = b.match_expr(
@@ -1156,14 +1109,7 @@ mod tests {
         assert_eq!(v2.arm(0).body.stmts().collect::<Vec<_>>(), [st]);
         let arm1 = v2.arm(1);
         assert_eq!(arm1.discriminant, Discriminant::Variant(1));
-        assert_eq!(
-            arm1.bindings().collect::<Vec<_>>(),
-            [MatchBinding {
-                field_index: 0,
-                name: v,
-                ty: str_ty
-            }]
-        );
+        assert_eq!(arm1.bindings().collect::<Vec<_>>(), binding);
         assert_eq!(arm1.body, MatchBodyView::Expr(e3));
 
         // The ranges are independent: m1 still decodes exactly after
@@ -1186,24 +1132,24 @@ mod tests {
         let x = pool.intern_str("x");
 
         let mut b = TirBuilder::new(main, vec![], int_ty, sp());
-        let scrut = b.var(shape, int_ty, sp());
+        let scrut = var(&mut b, shape, int_ty, sp());
         let body1 = b.int_const(1, int_ty, sp());
         let body2 = b.int_const(2, int_ty, sp());
         let arm0_bindings = [
             MatchBinding {
                 field_index: 0,
-                name: v,
+                id: declare(&mut b, v, str_ty, false),
                 ty: str_ty, // by-move: not Copy
             },
             MatchBinding {
                 field_index: 1,
-                name: w,
+                id: declare(&mut b, w, int_ty, false),
                 ty: int_ty, // copy: no owner token
             },
         ];
         let arm1_bindings = [MatchBinding {
             field_index: 0,
-            name: x,
+            id: declare(&mut b, x, str_ty, false),
             ty: str_ty,
         }];
         // Owner tokens: one FieldAccess per by-move binding, arm order

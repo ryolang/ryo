@@ -22,9 +22,9 @@ fn toview_arg_counts_as_borrow_rule7() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let inout_arg = tb.var(s, str_ty, span);
-    let view_base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let inout_arg = test_var(&mut tb, s, str_ty, span);
+    let view_base = test_var(&mut tb, s, str_ty, span);
     let view_arg = tb.to_view(view_base, view_ty, span);
     let call = tb.call(
         DeclId::NONE,
@@ -85,14 +85,14 @@ fn toview_read_counts_as_use_dead_store() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_hi = tb.str_const(pool.intern_str("hi"), str_ty, span);
-    let decl_s = tb.var_decl(s, false, str_ty, lit_hi, span);
+    let decl_s = test_var_decl(&mut tb, s, false, str_ty, lit_hi, span);
     let lit_yo = tb.str_const(pool.intern_str("yo"), str_ty, span);
-    let decl_o = tb.var_decl(other, false, str_ty, lit_yo, span);
-    let obase = tb.var(other, str_ty, span);
+    let decl_o = test_var_decl(&mut tb, other, false, str_ty, lit_yo, span);
+    let obase = test_var(&mut tb, other, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i1 = tb.int_const(1, int_ty, span);
     let sl = tb.slice(obase, Some(i0), Some(i1), view_ty, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let vos = tb.to_view(sread, view_ty, span);
     let eq = tb.binary(TirTag::StrCmpEq, bool_ty, vos, sl, span);
     let xlit = tb.str_const(pool.intern_str("x"), str_ty, span);
@@ -143,9 +143,9 @@ fn viewasowner_arg_counts_as_borrow_rule7() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let inout_arg = tb.var(s, str_ty, span);
-    let slice_base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let inout_arg = test_var(&mut tb, s, str_ty, span);
+    let slice_base = test_var(&mut tb, s, str_ty, span);
     let zero = tb.int_const(0, int_ty, span);
     let one = tb.int_const(1, int_ty, span);
     let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
@@ -208,8 +208,8 @@ fn viewasowner_reborrow_is_call_scoped() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let slice_base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let slice_base = test_var(&mut tb, s, str_ty, span);
     let zero = tb.int_const(0, int_ty, span);
     let one = tb.int_const(1, int_ty, span);
     let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
@@ -225,7 +225,7 @@ fn viewasowner_reborrow_is_call_scoped() {
     let show_stmt = tb.unary(TirTag::ExprStmt, void, show_call, span);
     // `s` moved later in the caller — fine: the re-borrow ended
     // with the `show` call.
-    let moved = tb.var(s, str_ty, span);
+    let moved = test_var(&mut tb, s, str_ty, span);
     let eat_call = tb.call(DeclId::NONE, eat, &[moved], &[ParamMode::Move], void, span);
     let eat_stmt = tb.unary(TirTag::ExprStmt, void, eat_call, span);
     let tir = tb.finish(&[decl, show_stmt, eat_stmt]);
@@ -264,6 +264,7 @@ fn str_materialize_result_is_fresh_owner() {
     let mut tb = TirBuilder::new(
         show,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: text,
             ty: view_ty,
             mode: ParamMode::Borrow,
@@ -272,7 +273,7 @@ fn str_materialize_result_is_fresh_owner() {
         str_ty,
         span,
     );
-    let arg = tb.var(text, view_ty, span);
+    let arg = test_var(&mut tb, text, view_ty, span);
     let copy = tb.call(
         DeclId::NONE,
         materialize,
@@ -323,9 +324,9 @@ fn str_materialize_arg_counts_as_borrow_rule7() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let inout_arg = tb.var(s, str_ty, span);
-    let slice_base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let inout_arg = test_var(&mut tb, s, str_ty, span);
+    let slice_base = test_var(&mut tb, s, str_ty, span);
     let zero = tb.int_const(0, int_ty, span);
     let one = tb.int_const(1, int_ty, span);
     let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
@@ -412,9 +413,9 @@ fn loop_view_created_after_owner_mutation_dies_within_iteration() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
         DeclId::NONE,
@@ -425,12 +426,12 @@ fn loop_view_created_after_owner_mutation_dies_within_iteration() {
         span,
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
-    let base = tb.var(s, str_ty, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
-    let vread = tb.var(v, view_ty, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -509,12 +510,12 @@ fn loop_view_live_at_back_edge_flags_earlier_mutation_on_rewalk() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
     let bang_lit = tb.str_const(bang, str_ty, span);
-    let suffix_decl = tb.var_decl(suffix, false, str_ty, bang_lit, span);
+    let suffix_decl = test_var_decl(&mut tb, suffix, false, str_ty, bang_lit, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sread = tb.var(s, str_ty, span);
-    let suffix_read = tb.var(suffix, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
+    let suffix_read = test_var(&mut tb, suffix, str_ty, span);
     let push = tb.call(
         DeclId::NONE,
         str_push,
@@ -524,11 +525,11 @@ fn loop_view_live_at_back_edge_flags_earlier_mutation_on_rewalk() {
         span,
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
-    let base = tb.var(s, str_ty, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let wl = tb.while_loop(cond, &[push_stmt, vdecl], void, span);
     let tir = tb.finish(&[decl, suffix_decl, wl]);
 
@@ -579,12 +580,12 @@ fn view_and_move_args_same_owner_rejected() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i1 = tb.int_const(1, int_ty, span);
     let view_arg = tb.slice(base, Some(i0), Some(i1), view_ty, span);
-    let move_arg = tb.var(s, str_ty, span);
+    let move_arg = test_var(&mut tb, s, str_ty, span);
     let call = tb.call(
         DeclId::NONE,
         two,
@@ -659,14 +660,14 @@ fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let vread = tb.var(v, view_ty, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,

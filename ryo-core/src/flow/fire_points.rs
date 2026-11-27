@@ -62,12 +62,13 @@
 //! tree, hence non-roots, so the first root at/after the anchor IS the
 //! anchor's consuming statement boundary.
 //!
-//! (b) *Deliberate same-position dedup.* Two events naming the SAME
-//! target at the SAME resolved point are a designed no-op pair (the
-//! consumer + return-epilogue double-anchor) — the resolver contract
-//! names this pair; the backend's per-block-visit `freed_targets` dedup
-//! (cleared on re-entry) is the consumption-side mechanism that
-//! consumes it. Pairs of this shape are never double-fires.
+//! (b) *Same-position duplicate tolerance.* Two events naming the SAME
+//! target at the SAME resolved point produce ONE release per block
+//! visit; dedup suppresses only the redundant event. Production
+//! scheduling avoids the redundant same-return pair; validator tests
+//! inject duplicates explicitly to pin this tolerance. The backend's
+//! per-block-visit `freed_targets` dedup (cleared on re-entry) is the
+//! consumption-side mechanism, so pairs of this shape never double-fire.
 //!
 //! (c) *Static/no-op elision is not an event.* Drops whose target is a
 //!   static `.rodata` literal (`StrConst`/`BytesConst`, cap == 0

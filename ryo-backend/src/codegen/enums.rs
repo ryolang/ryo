@@ -16,7 +16,7 @@ use cranelift::codegen::ir::{BlockArg, MemFlagsData, StackSlot, StackSlotData, S
 use cranelift::frontend::Switch;
 use cranelift::prelude::*;
 use cranelift_module::Module;
-use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
+use ryo_core::tir::{BindingId, ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{EnumVariantView, InternPool, TypeId, TypeKind, VariantKind};
 
 use super::expr::walker::{CodegenExprContext, EvalRequest};
@@ -67,7 +67,7 @@ impl<M: Module> Codegen<M> {
     /// its stack slot. Memoized into `inst_values` as
     /// `ValueRepr::Enum`. Mirrors `eval_inst_struct`: enum bindings
     /// share the family-agnostic `struct_locals` slot-address table
-    /// (keyed by binding name; every reader gates on the value's type
+    /// (keyed by `BindingId`; every reader gates on the value's type
     /// kind), so scoping restores work unchanged.
     pub(crate) fn eval_inst_enum(
         builder: &mut FunctionBuilder,
@@ -121,8 +121,12 @@ impl<M: Module> Codegen<M> {
                     TirData::Var(name) => name,
                     _ => unreachable!("Var must carry TirData::Var"),
                 };
-                let var = Self::read_slot(&ctx.struct_locals, name)
-                    .ok_or_else(|| format!("Undefined enum variable: '{}'", ctx.pool.str(name)))?;
+                let var = Self::read_slot(&ctx.struct_locals, name).ok_or_else(|| {
+                    format!(
+                        "Undefined enum variable: '{}'",
+                        ctx.pool.str(ctx.tir.binding_name(name))
+                    )
+                })?;
                 builder.use_var(var)
             }
             TirTag::FieldAccess => Self::field_addr_of_d(builder, ctx, r, context)?.0,
@@ -602,10 +606,10 @@ impl<M: Module> Codegen<M> {
         Self::write_slot(
             &mut ctx.struct_locals,
             &mut ctx.struct_locals_undo,
-            view.name,
+            view.id,
             Some(var),
         );
-        ctx.aggregate_binding_storage.insert(r, var);
+        ctx.aggregate_binding_storage[view.id.index()] = Some(var);
         Ok(Terminator::None)
     }
 
@@ -621,10 +625,11 @@ impl<M: Module> Codegen<M> {
     ) -> Result<Terminator, String> {
         let inst = ctx.tir.inst(r);
         let view = ctx.tir.assign_view(r);
-        let var = Self::read_slot(&ctx.struct_locals, view.name).ok_or_else(|| {
+        let name = view.id;
+        let var = Self::read_slot(&ctx.struct_locals, name).ok_or_else(|| {
             format!(
                 "Undefined enum variable in assign: '{}'",
-                ctx.pool.str(view.name)
+                ctx.pool.str(ctx.tir.binding_name(name))
             )
         })?;
         let dst = builder.use_var(var);
@@ -681,7 +686,7 @@ impl<M: Module> Codegen<M> {
     /// Whole-enum scheduled Free (M11): when `target` is enum-typed,
     /// resolve its slot address — the binding's CURRENT
     /// `struct_locals` entry (same reasoning as the fat
-    /// `free_binding_names` path; enum bindings share the
+    /// `free_binding_ids` path; enum bindings share the
     /// family-agnostic table) or the producing inst's cached
     /// `ValueRepr::Enum` — and run the tag-dispatched payload drop.
     /// Returns `Ok(true)` when the target was an enum (handled), so
@@ -690,7 +695,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         target: TirRef,
-        binding: Option<TirRef>,
+        binding: Option<BindingId>,
     ) -> Result<bool, String> {
         let ty = if let Some(idx) = target.as_param_index() {
             ctx.tir.params[idx as usize].ty
@@ -701,10 +706,7 @@ impl<M: Module> Codegen<M> {
             return Ok(false);
         }
         let addr = if let Some(binding) = binding {
-            let var = ctx
-                .aggregate_binding_storage
-                .get(&binding)
-                .copied()
+            let var = Self::read_slot(&ctx.aggregate_binding_storage, binding)
                 .ok_or_else(|| format!("aggregate release has no storage for {binding:?}"))?;
             builder.use_var(var)
         } else {

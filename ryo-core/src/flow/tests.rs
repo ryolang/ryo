@@ -3,7 +3,11 @@
 
 use super::*;
 use crate::declaration::DeclId;
-use crate::tir::{TirBuilder, TirTag, TypedMatchArm, TypedMatchBody};
+use crate::tir::test_bindings::*;
+use crate::tir::{
+    BindingId, BindingInfo, BindingKind, ParamMode, ScopeId, TirBuilder, TirParam, TirTag,
+    TypedMatchArm, TypedMatchBody,
+};
 use crate::types::InternPool;
 
 fn sp() -> Span {
@@ -60,7 +64,7 @@ fn flow_records_only_reachable_implicit_fallthrough() {
 
     let mut b = cx.builder();
     let one = b.int_const(1, cx.int, sp());
-    let decl = b.var_decl(cx.x, false, cx.int, one, sp());
+    let decl = var_decl(&mut b, cx.x, false, cx.int, one, sp());
     let fallthrough = b.finish(&[decl]);
     assert!(Flow::build(&fallthrough, &cx.pool).has_implicit_fallthrough());
 
@@ -87,7 +91,7 @@ fn flow_records_only_reachable_implicit_fallthrough() {
     let call = b.call(DeclId::NONE, callee, &[], &[], cx.never, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, call, sp());
     let one = b.int_const(1, cx.int, sp());
-    let dead = b.var_decl(cx.x, false, cx.int, one, sp());
+    let dead = var_decl(&mut b, cx.x, false, cx.int, one, sp());
     let dead_continuation = b.finish(&[expr, dead]);
     let flow = Flow::build(&dead_continuation, &cx.pool);
     assert!(flow.blocks.iter().any(|block| block.unreachable));
@@ -102,7 +106,7 @@ fn linear_body_is_one_block_in_evaluation_order() {
     let one = b.int_const(1, int, sp());
     let two = b.int_const(2, int, sp());
     let sum = b.binary(TirTag::IAdd, int, one, two, sp());
-    let decl = b.var_decl(cx.x, false, int, sum, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, sum, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -126,12 +130,12 @@ fn if_else_cascades_with_explicit_join_preds() {
     let int = cx.int;
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
-    let decl = b.var_decl(cx.x, true, int, zero, sp());
-    let cond = b.var(cx.x, int, sp());
+    let decl = var_decl(&mut b, cx.x, true, int, zero, sp());
+    let cond = var(&mut b, cx.x, int, sp());
     let one = b.int_const(1, int, sp());
-    let then_a = b.assign(cx.x, int, one, sp());
+    let then_a = assign(&mut b, cx.x, int, one, sp());
     let two = b.int_const(2, int, sp());
-    let else_a = b.assign(cx.x, int, two, sp());
+    let else_a = assign(&mut b, cx.x, int, two, sp());
     let ifs = b.if_stmt(cond, &[then_a], &[], Some(&[else_a]), cx.void, sp());
     let tir = b.finish(&[decl, ifs]);
 
@@ -165,13 +169,15 @@ fn while_loop_backedge_and_break_continue_targets() {
     let bool_ty = cx.pool.bool_();
     let mut b = cx.builder();
     let t = cx.pool.intern_str("t");
-    let cond_if = b.var(t, bool_ty, sp());
-    let cond_while = b.var(t, bool_ty, sp());
+    let initial_t = b.bool_const(true, bool_ty, sp());
+    let t_decl = var_decl(&mut b, t, false, bool_ty, initial_t, sp());
+    let cond_if = var(&mut b, t, bool_ty, sp());
+    let cond_while = var(&mut b, t, bool_ty, sp());
     let brk = b.break_stmt(cx.never, sp());
     let cont = b.continue_stmt(cx.never, sp());
     let body_stmt = b.if_stmt(cond_if, &[brk], &[], Some(&[cont]), cx.void, sp());
     let whl = b.while_loop(cond_while, &[body_stmt], cx.void, sp());
-    let tir = b.finish(&[whl]);
+    let tir = b.finish(&[t_decl, whl]);
 
     let flow = Flow::build(&tir, &cx.pool);
     assert!(matches!(flow.term(flow.entry), Terminator::While { .. }));
@@ -215,14 +221,17 @@ fn for_loop_dead_join_does_not_emit_backedge() {
     let bool_ty = cx.pool.bool_();
     let mut b = cx.builder();
     let t = cx.pool.intern_str("t");
-    let cond_if = b.var(t, bool_ty, sp());
+    let initial_t = b.bool_const(true, bool_ty, sp());
+    let t_decl = var_decl(&mut b, t, false, bool_ty, initial_t, sp());
+    let cond_if = var(&mut b, t, bool_ty, sp());
     let zero = b.int_const(0, cx.int, sp());
     let ten = b.int_const(10, cx.int, sp());
     let brk = b.break_stmt(cx.never, sp());
     let cont = b.continue_stmt(cx.never, sp());
+    let induction = declare(&mut b, cx.i, cx.int, false);
     let body_stmt = b.if_stmt(cond_if, &[brk], &[], Some(&[cont]), cx.void, sp());
-    let for_stmt = b.for_range(cx.i, zero, ten, &[body_stmt], cx.void, sp());
-    let tir = b.finish(&[for_stmt]);
+    let for_stmt = for_range(&mut b, induction, zero, ten, &[body_stmt], cx.void, sp());
+    let tir = b.finish(&[t_decl, for_stmt]);
 
     let flow = Flow::build(&tir, &cx.pool);
     let header = match flow.term(flow.entry) {
@@ -247,10 +256,24 @@ fn for_loop_binds_induction_place_in_body_scope() {
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
     let ten = b.int_const(10, int, sp());
-    let read_i = b.var(cx.i, int, sp());
+    let induction = declare(&mut b, cx.i, int, false);
+    let read_i = var(&mut b, cx.i, int, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, read_i, sp());
-    let f = b.for_range(cx.i, zero, ten, &[expr], cx.void, sp());
+    let f = for_range(&mut b, induction, zero, ten, &[expr], cx.void, sp());
     let tir = b.finish(&[f]);
+
+    let loop_view = tir.for_range_view(f);
+    let crate::tir::TirData::Var(read_id) = tir.inst(read_i).data else {
+        panic!("body instruction must remain a variable read")
+    };
+    assert_eq!(read_id, loop_view.id);
+    assert_eq!(
+        tir.bindings()
+            .get(loop_view.id)
+            .expect("induction metadata")
+            .ty,
+        int
+    );
 
     let flow = Flow::build(&tir, &cx.pool);
     let var_place = flow.loop_var(f).expect("loop var place");
@@ -275,11 +298,11 @@ fn shadowing_mints_distinct_places() {
     let int = cx.int;
     let mut b = cx.builder();
     let one = b.int_const(1, int, sp());
-    let outer = b.var_decl(cx.x, false, int, one, sp());
+    let outer = var_decl(&mut b, cx.x, false, int, one, sp());
     let cond = b.bool_const(true, cx.pool.bool_(), sp());
     let two = b.int_const(2, int, sp());
-    let inner = b.var_decl(cx.x, false, int, two, sp());
-    let then_read = b.var(cx.x, int, sp());
+    let inner = var_decl(&mut b, cx.x, false, int, two, sp());
+    let then_read = var(&mut b, cx.x, int, sp());
     let then_e = b.unary(TirTag::ExprStmt, cx.void, then_read, sp());
     let ifs = b.if_stmt(cond, &[inner, then_e], &[], None, cx.void, sp());
     let tir = b.finish(&[outer, ifs]);
@@ -304,12 +327,12 @@ fn view_place_protects_owner_place() {
     let s_name = cx.pool.intern_str("s");
     let mut b = cx.builder();
     let lit = b.str_const(cx.pool.intern_str("hello"), str_ty, sp());
-    let decl = b.var_decl(s_name, false, str_ty, lit, sp());
+    let decl = var_decl(&mut b, s_name, false, str_ty, lit, sp());
     let zero = b.int_const(0, cx.int, sp());
     let three = b.int_const(3, cx.int, sp());
-    let base = b.var(s_name, str_ty, sp());
+    let base = var(&mut b, s_name, str_ty, sp());
     let sl = b.slice(base, Some(zero), Some(three), view_ty, sp());
-    let vdecl = b.var_decl(v_name, false, view_ty, sl, sp());
+    let vdecl = var_decl(&mut b, v_name, false, view_ty, sl, sp());
     let tir = b.finish(&[decl, vdecl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -327,7 +350,7 @@ fn diverging_call_terminates_block_and_continues_unreachable() {
     let call = b.call(DeclId::NONE, callee, &[], &[], cx.never, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, call, sp());
     let one = b.int_const(1, cx.int, sp());
-    let dead = b.var_decl(cx.x, false, cx.int, one, sp());
+    let dead = var_decl(&mut b, cx.x, false, cx.int, one, sp());
     let tir = b.finish(&[expr, dead]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -366,7 +389,7 @@ fn value_match_switch_with_join_and_result_place() {
     );
     let two = b.int_const(2, int, sp());
     let use_m = b.binary(TirTag::IAdd, int, m, two, sp());
-    let decl = b.var_decl(cx.x, false, int, use_m, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, use_m, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -417,7 +440,7 @@ fn all_diverging_match_has_no_join_and_unreachable_continuation() {
     );
     let expr = b.unary(TirTag::ExprStmt, cx.void, m, sp());
     let one = b.int_const(1, int, sp());
-    let dead = b.var_decl(cx.x, false, int, one, sp());
+    let dead = var_decl(&mut b, cx.x, false, int, one, sp());
     let tir = b.finish(&[expr, dead]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -450,11 +473,12 @@ fn match_by_move_token_places_are_named_and_arm_scoped() {
     let lit = b.str_const(cx.pool.intern_str("payload"), str_ty, sp());
     let c2 = b.str_const(cx.pool.intern_str("other"), str_ty, sp());
     let scrut = b.struct_lit(pair_ty, &[(0, lit), (1, c2)], sp());
-    let body_read = b.var(v, str_ty, sp());
+    let body_read = var(&mut b, v, str_ty, sp());
     let body_expr = b.unary(TirTag::ExprStmt, cx.void, body_read, sp());
     let body = [body_expr];
     // Owner token: FieldAccess immediately before the match.
     let token = b.field_access(scrut, 0, str_ty, sp());
+    let binding_id = binding(&mut b, v, str_ty);
     let m = b.match_expr(
         scrut,
         cx.void,
@@ -463,7 +487,7 @@ fn match_by_move_token_places_are_named_and_arm_scoped() {
             discriminant: crate::tir::Discriminant::Wildcard,
             bindings: &[crate::tir::MatchBinding {
                 field_index: 0,
-                name: v,
+                id: binding_id,
                 ty: str_ty,
             }],
             guards: &[],
@@ -580,7 +604,7 @@ fn bool_and_places_rhs_in_conditional_block() {
     let f = b.bool_const(false, bool_ty, sp());
     let call = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let and = b.binary(TirTag::BoolAnd, bool_ty, f, call, sp());
-    let decl = b.var_decl(cx.x, false, bool_ty, and, sp());
+    let decl = var_decl(&mut b, cx.x, false, bool_ty, and, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -610,7 +634,7 @@ fn bool_or_short_circuits_on_true() {
     let t = b.bool_const(true, bool_ty, sp());
     let call = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let or = b.binary(TirTag::BoolOr, bool_ty, t, call, sp());
-    let decl = b.var_decl(cx.x, false, bool_ty, or, sp());
+    let decl = var_decl(&mut b, cx.x, false, bool_ty, or, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -634,7 +658,8 @@ fn for_bounds_steps_live_in_preheader() {
     let start_name = cx.pool.intern_str("start");
     let start_call = b.call(DeclId::NONE, start_name, &[], &[], int, sp());
     let end = b.int_const(3, int, sp());
-    let f = b.for_range(cx.i, start_call, end, &[], cx.void, sp());
+    let induction = declare(&mut b, cx.i, int, false);
+    let f = for_range(&mut b, induction, start_call, end, &[], cx.void, sp());
     let tir = b.finish(&[f]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -675,8 +700,8 @@ fn field_assign_records_field_replace_fact() {
     let a = b.str_const(cx.pool.intern_str("a"), str_ty, sp());
     let c = b.str_const(cx.pool.intern_str("c"), str_ty, sp());
     let lit = b.struct_lit(pair_ty, &[(0, a), (1, c)], sp());
-    let decl = b.var_decl(cx.x, true, pair_ty, lit, sp());
-    let base = b.var(cx.x, pair_ty, sp());
+    let decl = var_decl(&mut b, cx.x, true, pair_ty, lit, sp());
+    let base = var(&mut b, cx.x, pair_ty, sp());
     let target = b.field_access(base, 1, str_ty, sp());
     let newv = b.str_const(cx.pool.intern_str("d"), str_ty, sp());
     let fa = b.field_assign(target, newv, cx.void, sp());
@@ -701,7 +726,7 @@ fn bool_and_chain_split_pins_join_pred_shape() {
     let inner = b.binary(TirTag::BoolAnd, bool_ty, f, call1, sp());
     let call2 = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let outer = b.binary(TirTag::BoolAnd, bool_ty, inner, call2, sp());
-    let decl = b.var_decl(cx.x, false, bool_ty, outer, sp());
+    let decl = var_decl(&mut b, cx.x, false, bool_ty, outer, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -739,7 +764,7 @@ fn deep_bool_and_chain_stays_on_the_iterative_flow_builder() {
         let rhs = b.bool_const(true, bool_ty, sp());
         chain = b.binary(TirTag::BoolAnd, bool_ty, chain, rhs, sp());
     }
-    let decl = b.var_decl(cx.x, false, bool_ty, chain, sp());
+    let decl = var_decl(&mut b, cx.x, false, bool_ty, chain, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -765,7 +790,7 @@ fn deep_chain_through_diverging_calls_stays_iterative() {
         let lhs = b.int_const(1, int, sp());
         chain = b.binary(TirTag::IAdd, int, lhs, call, sp());
     }
-    let decl = b.var_decl(cx.x, false, int, chain, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, chain, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -782,9 +807,9 @@ fn bool_and_if_condition_branches_from_the_merge_join() {
     let call = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let and = b.binary(TirTag::BoolAnd, bool_ty, f, call, sp());
     let one = b.int_const(1, cx.int, sp());
-    let then_d = b.var_decl(cx.x, false, cx.int, one, sp());
+    let then_d = var_decl(&mut b, cx.x, false, cx.int, one, sp());
     let two = b.int_const(2, cx.int, sp());
-    let else_d = b.var_decl(cx.x, false, cx.int, two, sp());
+    let else_d = var_decl(&mut b, cx.x, false, cx.int, two, sp());
     let ifs = b.if_stmt(and, &[then_d], &[], Some(&[else_d]), cx.void, sp());
     let tir = b.finish(&[ifs]);
 
@@ -815,12 +840,15 @@ fn for_and_while_backedges_resolve_to_their_test_headers() {
     let bool_ty = cx.pool.bool_();
     let mut b = cx.builder();
     let t = cx.pool.intern_str("t");
-    let cond = b.var(t, bool_ty, sp());
+    let initial_t = b.bool_const(true, bool_ty, sp());
+    let t_decl = var_decl(&mut b, t, false, bool_ty, initial_t, sp());
+    let cond = var(&mut b, t, bool_ty, sp());
     let zero = b.int_const(0, int, sp());
     let three = b.int_const(3, int, sp());
-    let f = b.for_range(cx.i, zero, three, &[], cx.void, sp());
+    let induction = declare(&mut b, cx.i, int, false);
+    let f = for_range(&mut b, induction, zero, three, &[], cx.void, sp());
     let whl = b.while_loop(cond, &[f], cx.void, sp());
-    let tir = b.finish(&[whl]);
+    let tir = b.finish(&[t_decl, whl]);
 
     let flow = Flow::build(&tir, &cx.pool);
     // While shape: entry enters the header, which tests the condition.
@@ -888,10 +916,10 @@ fn match_result_place_tracks_value_void_and_never_shapes() {
     );
     let two = b.int_const(2, int, sp());
     let use_m = b.binary(TirTag::IAdd, int, m_value, two, sp());
-    let decl = b.var_decl(cx.x, false, int, use_m, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, use_m, sp());
     // Void statement match: a join, but no result place.
     let scrut_s = b.int_const(3, int, sp());
-    let read_s = b.var(cx.x, int, sp());
+    let read_s = var(&mut b, cx.x, int, sp());
     let stmt_s = b.unary(TirTag::ExprStmt, cx.void, read_s, sp());
     let stmts_s = [stmt_s];
     let m_void = b.match_expr(
@@ -967,19 +995,21 @@ fn bool_or_with_nested_and_rhs_reaches_join_through_nested_blocks() {
     // nested and-join, and the or's rhs block reaches the or-join
     // through the nested construct's blocks (the rhs block itself does
     // NOT jump to the or-join).
-    let cval1 = b.var(cx.x, int, sp());
+    let initial_c = b.int_const(0, int, sp());
+    let c_decl = var_decl(&mut b, cx.x, false, int, initial_c, sp());
+    let cval1 = var(&mut b, cx.x, int, sp());
     let c45 = b.int_const(45, int, sp());
     let eq45 = b.binary(TirTag::ICmpEq, bool_ty, cval1, c45, sp());
-    let cval2 = b.var(cx.x, int, sp());
+    let cval2 = var(&mut b, cx.x, int, sp());
     let c48 = b.int_const(48, int, sp());
     let ge = b.binary(TirTag::ICmpGe, bool_ty, cval2, c48, sp());
-    let cval3 = b.var(cx.x, int, sp());
+    let cval3 = var(&mut b, cx.x, int, sp());
     let c57 = b.int_const(57, int, sp());
     let le = b.binary(TirTag::ICmpLe, bool_ty, cval3, c57, sp());
     let and = b.binary(TirTag::BoolAnd, bool_ty, ge, le, sp());
     let or = b.binary(TirTag::BoolOr, bool_ty, eq45, and, sp());
-    let decl = b.var_decl(cx.i, false, bool_ty, or, sp());
-    let tir = b.finish(&[decl]);
+    let decl = var_decl(&mut b, cx.i, false, bool_ty, or, sp());
+    let tir = b.finish(&[c_decl, decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
     // The and-join holds the merged and value; the or-join holds the
@@ -1022,6 +1052,457 @@ fn bool_or_with_nested_and_rhs_reaches_join_through_nested_blocks() {
     assert!(reaches, "or rhs block must reach the or-join");
 }
 
+fn scoped_binding(
+    builder: &mut TirBuilder,
+    name: crate::types::StringId,
+    ty: crate::types::TypeId,
+    scope: usize,
+) -> BindingId {
+    builder.register_binding(BindingInfo::new(
+        name,
+        ty,
+        BindingKind::Local {
+            mutable: false,
+            borrowed: false,
+        },
+        ScopeId::from_index(scope),
+        sp(),
+    ))
+}
+
+#[test]
+fn flow_uses_binding_ids_without_name_resolution() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let x = cx.x;
+    let param_id = BindingId::from_index(0);
+    let param = TirParam::new(param_id, x, int, ParamMode::Borrow, sp());
+    let mut b = TirBuilder::new(cx.main, vec![param], cx.void, sp());
+
+    let outer_id = scoped_binding(&mut b, x, int, 0);
+    let one = b.int_const(1, int, sp());
+    let outer = b.var_decl(outer_id, false, int, one, sp());
+    let inner_id = scoped_binding(&mut b, x, int, 1);
+    let two = b.int_const(2, int, sp());
+    let inner = b.var_decl(inner_id, false, int, two, sp());
+    let outer_read = b.var(outer_id, int, sp());
+    let outer_stmt = b.unary(TirTag::ExprStmt, cx.void, outer_read, sp());
+    let cond = b.bool_const(true, cx.pool.bool_(), sp());
+    let branch = b.if_stmt(cond, &[inner, outer_stmt], &[], None, cx.void, sp());
+
+    let induction_id = scoped_binding(&mut b, x, int, 2);
+    let zero = b.int_const(0, int, sp());
+    let ten = b.int_const(10, int, sp());
+    let param_read = b.var(param_id, int, sp());
+    let param_stmt = b.unary(TirTag::ExprStmt, cx.void, param_read, sp());
+    let loop_ = b.for_range(induction_id, zero, ten, &[param_stmt], cx.void, sp());
+
+    let str_ty = cx.pool.str_();
+    let field = cx.pool.intern_str("field");
+    let pair_ty = cx.pool.anon_struct(&[(field, str_ty)]);
+    let payload = b.str_const(cx.pool.intern_str("payload"), str_ty, sp());
+    let scrutinee = b.struct_lit(pair_ty, &[(0, payload)], sp());
+    let outer_read_in_match = b.var(outer_id, int, sp());
+    let match_stmt = b.unary(TirTag::ExprStmt, cx.void, outer_read_in_match, sp());
+    let match_body = [match_stmt];
+    let _token = b.field_access(scrutinee, 0, str_ty, sp());
+    let token_id = scoped_binding(&mut b, x, str_ty, 3);
+    let match_ = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[TypedMatchArm {
+            span: sp(),
+            discriminant: crate::tir::Discriminant::Wildcard,
+            bindings: &[crate::tir::MatchBinding {
+                field_index: 0,
+                id: token_id,
+                ty: str_ty,
+            }],
+            guards: &[],
+            body: TypedMatchBody::Stmts(&match_body),
+        }],
+        sp(),
+    );
+    let tir = b.finish(&[outer, branch, loop_, match_]);
+    let flow = Flow::build(&tir, &cx.pool);
+
+    let param_place = flow.resolve(param_id).expect("param binding");
+    let outer_place = flow.resolve(outer_id).expect("outer binding");
+    let inner_place = flow.resolve(inner_id).expect("inner binding");
+    let induction_place = flow.resolve(induction_id).expect("induction binding");
+    let token_place = flow.resolve(token_id).expect("token binding");
+    assert!(matches!(
+        flow.place(param_place),
+        Place::Param { binding, .. } if *binding == param_id
+    ));
+    assert!(matches!(
+        flow.place(outer_place),
+        Place::Local { binding, .. } if *binding == outer_id
+    ));
+    assert!(matches!(
+        flow.place(inner_place),
+        Place::Local { binding, .. } if *binding == inner_id
+    ));
+    assert!(matches!(
+        flow.place(induction_place),
+        Place::LoopVar { binding, .. } if *binding == induction_id
+    ));
+    assert!(matches!(
+        flow.place(token_place),
+        Place::Token { binding, .. } if *binding == token_id
+    ));
+    assert_eq!(flow.place(param_place).ty(), int);
+    assert_eq!(flow.place(induction_place).ty(), int);
+    assert_eq!(flow.place(token_place).ty(), str_ty);
+    assert_eq!(flow.local_of_decl(outer), Some(outer_place));
+    assert_eq!(flow.local_of_decl(inner), Some(inner_place));
+    assert_eq!(flow.loop_var(loop_), Some(induction_place));
+    assert_eq!(flow.token_places(match_), &[token_place]);
+    assert_eq!(flow.facts_of(outer_read).unwrap().read, Some(outer_place));
+    assert_eq!(flow.facts_of(param_read).unwrap().read, Some(param_place));
+    assert_eq!(
+        flow.facts_of(outer_read_in_match).unwrap().read,
+        Some(outer_place)
+    );
+    let distinct = [
+        param_place,
+        outer_place,
+        inner_place,
+        induction_place,
+        token_place,
+    ]
+    .into_iter()
+    .collect::<std::collections::HashSet<_>>();
+    assert_eq!(distinct.len(), 5, "PlaceId remains distinct per place");
+    assert_eq!(flow.resolve(BindingId::from_index(99)), None);
+}
+
+#[test]
+fn flow_scope_ancestry_is_structural_not_numeric() {
+    let cx = Ctx::new();
+    let int = cx.int;
+    let mut b = TirBuilder::new(cx.main, vec![], cx.void, sp());
+    let outer_id = scoped_binding(&mut b, cx.x, int, 9);
+    let one = b.int_const(1, int, sp());
+    let outer = b.var_decl(outer_id, false, int, one, sp());
+    let nested_read = b.var(outer_id, int, sp());
+    let nested_stmt = b.unary(TirTag::ExprStmt, cx.void, nested_read, sp());
+    let inner_cond = b.bool_const(true, cx.pool.bool_(), sp());
+    let inner = b.if_stmt(inner_cond, &[nested_stmt], &[], None, cx.void, sp());
+    let outer_cond = b.bool_const(true, cx.pool.bool_(), sp());
+    let nested = b.if_stmt(outer_cond, &[inner], &[], None, cx.void, sp());
+
+    let sibling_id = scoped_binding(&mut b, cx.i, int, 2);
+    let two = b.int_const(2, int, sp());
+    let sibling_decl = b.var_decl(sibling_id, false, int, two, sp());
+    let first_cond = b.bool_const(true, cx.pool.bool_(), sp());
+    let first = b.if_stmt(first_cond, &[sibling_decl], &[], None, cx.void, sp());
+    let sibling_outer_read = b.var(outer_id, int, sp());
+    let sibling_stmt = b.unary(TirTag::ExprStmt, cx.void, sibling_outer_read, sp());
+    let second_cond = b.bool_const(true, cx.pool.bool_(), sp());
+    let second = b.if_stmt(second_cond, &[sibling_stmt], &[], None, cx.void, sp());
+    let tir = b
+        .with_layout_context(&cx.pool)
+        .finish(&[outer, nested, first, second]);
+
+    let flow = Flow::try_build(&tir, &cx.pool).expect("structural ancestors remain visible");
+    let outer_place = flow.resolve(outer_id).expect("outer binding");
+    assert_eq!(flow.facts_of(nested_read).unwrap().read, Some(outer_place));
+    assert_eq!(
+        flow.facts_of(sibling_outer_read).unwrap().read,
+        Some(outer_place)
+    );
+}
+
+#[test]
+fn flow_rejects_sibling_scope_binding_id() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let mut b = cx.builder();
+    let inner_id = scoped_binding(&mut b, cx.x, int, 4);
+    let one = b.int_const(1, int, sp());
+    let decl = b.var_decl(inner_id, false, int, one, sp());
+    let first_cond = b.bool_const(true, cx.pool.bool_(), sp());
+    let first = b.if_stmt(first_cond, &[decl], &[], None, cx.void, sp());
+    let read = b.var(inner_id, int, sp());
+    let stmt = b.unary(TirTag::ExprStmt, cx.void, read, sp());
+    let second_cond = b.bool_const(true, cx.pool.bool_(), sp());
+    let second = b.if_stmt(second_cond, &[stmt], &[], None, cx.void, sp());
+    let tir = b.with_layout_context(&cx.pool).finish(&[first, second]);
+
+    let error = Flow::try_build(&tir, &cx.pool)
+        .expect_err("a sibling scope must not inherit the first sibling's bindings");
+    assert!(error.contains("outside binding scope"), "{error}");
+}
+
+#[test]
+fn flow_rejects_cross_body_binding_id() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let mut bodies = Vec::new();
+    for _ in 0..2 {
+        let mut b = cx.builder();
+        let id = scoped_binding(&mut b, cx.x, int, 0);
+        assert_eq!(id, BindingId::from_index(0));
+        let one = b.int_const(1, int, sp());
+        let decl = b.var_decl(id, false, int, one, sp());
+        bodies.push(b.finish(&[decl]));
+    }
+    let flow = Flow::build(&bodies[0], &cx.pool);
+    assert!(matches!(
+        flow.place(flow.resolve(BindingId::from_index(0)).unwrap()),
+        Place::Local { binding, .. } if *binding == BindingId::from_index(0)
+    ));
+
+    let error = flow
+        .require_bindings(&bodies[1], &cx.pool)
+        .expect_err("an in-range ID from another body is not provenance");
+    assert!(error.contains("different typed body"), "{error}");
+}
+
+fn restamp_malformed_artifact(flow: &mut Flow, tir: &crate::tir::Tir) {
+    flow.content_stamp = flow.representation_stamp();
+    flow.require_body(tir)
+        .expect("malformed identity data must reach require_bindings");
+}
+
+#[test]
+fn flow_rejects_invalid_dense_binding_entries() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let mut b = cx.builder();
+    let root_id = scoped_binding(&mut b, cx.x, int, 0);
+    let one = b.int_const(1, int, sp());
+    let root = b.var_decl(root_id, false, int, one, sp());
+    let field = cx.pool.intern_str("field");
+    let pair_ty = cx.pool.anon_struct(&[(field, int)]);
+    let value = b.int_const(2, int, sp());
+    let scrutinee = b.struct_lit(pair_ty, &[(0, value)], sp());
+    let copy_id = scoped_binding(&mut b, cx.i, int, 1);
+    let match_ = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[TypedMatchArm {
+            span: sp(),
+            discriminant: crate::tir::Discriminant::Wildcard,
+            bindings: &[crate::tir::MatchBinding {
+                field_index: 0,
+                id: copy_id,
+                ty: int,
+            }],
+            guards: &[],
+            body: TypedMatchBody::Stmts(&[]),
+        }],
+        sp(),
+    );
+    let tir = b.finish(&[root, match_]);
+    let flow = Flow::build(&tir, &cx.pool);
+    let root_place = flow.local_of_decl(root).expect("root place");
+    assert_eq!(flow.resolve(copy_id), None);
+
+    for (label, entry) in [
+        ("aliased dense entry", Some(root_place)),
+        ("out-of-bounds dense entry", Some(PlaceId(u32::MAX))),
+    ] {
+        let mut malformed = flow.clone();
+        malformed.binding_places[copy_id.index()] = entry;
+        assert_ne!(
+            flow.representation_stamp(),
+            malformed.representation_stamp()
+        );
+        restamp_malformed_artifact(&mut malformed, &tir);
+        malformed.require_bindings(&tir, &cx.pool).expect_err(label);
+    }
+
+    let mut malformed = flow.clone();
+    malformed.binding_places.push(None);
+    restamp_malformed_artifact(&mut malformed, &tir);
+    malformed
+        .require_bindings(&tir, &cx.pool)
+        .expect_err("dense table length must match the TIR binding table");
+}
+
+#[test]
+fn flow_rejects_token_with_wrong_owner_instruction() {
+    let mut cx = Ctx::new();
+    let str_ty = cx.pool.str_();
+    let first_field = cx.pool.intern_str("first");
+    let second_field = cx.pool.intern_str("second");
+    let pair_ty = cx
+        .pool
+        .anon_struct(&[(first_field, str_ty), (second_field, str_ty)]);
+    let mut b = cx.builder();
+    let first_value = b.str_const(cx.pool.intern_str("first value"), str_ty, sp());
+    let second_value = b.str_const(cx.pool.intern_str("second value"), str_ty, sp());
+    let scrutinee = b.struct_lit(pair_ty, &[(0, first_value), (1, second_value)], sp());
+    let first_id = scoped_binding(&mut b, cx.x, str_ty, 1);
+    let second_id = scoped_binding(&mut b, cx.x, str_ty, 1);
+    let first_owner = b.field_access(scrutinee, 0, str_ty, sp());
+    let second_owner = b.field_access(scrutinee, 1, str_ty, sp());
+    let match_ = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Wildcard,
+                bindings: &[crate::tir::MatchBinding {
+                    field_index: 0,
+                    id: first_id,
+                    ty: str_ty,
+                }],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[]),
+            },
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Wildcard,
+                bindings: &[crate::tir::MatchBinding {
+                    field_index: 1,
+                    id: second_id,
+                    ty: str_ty,
+                }],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[]),
+            },
+        ],
+        sp(),
+    );
+    let tir = b.finish(&[match_]);
+    let flow = Flow::build(&tir, &cx.pool);
+    let token_place = flow.token_places(match_)[0];
+    assert!(matches!(
+        flow.place(token_place),
+        Place::Token { inst, .. } if *inst == first_owner
+    ));
+
+    let mut malformed = flow.clone();
+    let Place::Token { inst, .. } = &mut malformed.places[token_place.0 as usize] else {
+        panic!("fixture must contain a token")
+    };
+    *inst = second_owner;
+    restamp_malformed_artifact(&mut malformed, &tir);
+    malformed
+        .require_bindings(&tir, &cx.pool)
+        .expect_err("same-name/same-type token must retain its TIR owner-token association");
+}
+
+#[test]
+fn flow_copy_match_binding_after_close_reports_scope() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let field = cx.pool.intern_str("field");
+    let pair_ty = cx.pool.anon_struct(&[(field, int)]);
+    let mut b = cx.builder();
+    let value = b.int_const(1, int, sp());
+    let scrutinee = b.struct_lit(pair_ty, &[(0, value)], sp());
+    let copy_id = scoped_binding(&mut b, cx.x, int, 1);
+    let match_ = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[TypedMatchArm {
+            span: sp(),
+            discriminant: crate::tir::Discriminant::Wildcard,
+            bindings: &[crate::tir::MatchBinding {
+                field_index: 0,
+                id: copy_id,
+                ty: int,
+            }],
+            guards: &[],
+            body: TypedMatchBody::Stmts(&[]),
+        }],
+        sp(),
+    );
+    let read = b.var(copy_id, int, sp());
+    let stmt = b.unary(TirTag::ExprStmt, cx.void, read, sp());
+    let tir = b.with_layout_context(&cx.pool).finish(&[match_, stmt]);
+
+    let error = Flow::try_build(&tir, &cx.pool).expect_err("closed copy binding");
+    assert!(error.contains("outside binding scope"), "{error}");
+}
+
+#[test]
+fn flow_rejects_duplicate_copy_binding_declaration() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let field = cx.pool.intern_str("field");
+    let pair_ty = cx.pool.anon_struct(&[(field, int)]);
+    let mut b = cx.builder();
+    let value = b.int_const(1, int, sp());
+    let scrutinee = b.struct_lit(pair_ty, &[(0, value)], sp());
+    let copy_id = scoped_binding(&mut b, cx.x, int, 1);
+    let binding = crate::tir::MatchBinding {
+        field_index: 0,
+        id: copy_id,
+        ty: int,
+    };
+    let match_ = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[TypedMatchArm {
+            span: sp(),
+            discriminant: crate::tir::Discriminant::Wildcard,
+            bindings: &[binding, binding],
+            guards: &[],
+            body: TypedMatchBody::Stmts(&[]),
+        }],
+        sp(),
+    );
+    let tir = b.with_layout_context(&cx.pool).finish(&[match_]);
+
+    let error = Flow::try_build(&tir, &cx.pool).expect_err("duplicate copy binding");
+    assert!(error.contains("declared twice"), "{error}");
+}
+
+#[test]
+fn flow_declaration_and_lookup_scaling_is_not_quadratic() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    fn median_build_time(cx: &mut Ctx, count: usize) -> std::time::Duration {
+        let int = cx.int;
+        let mut b = cx.builder();
+        let mut statements = Vec::with_capacity(count);
+        for index in 0..count {
+            let name = cx.pool.intern_str(&format!("binding_{index}"));
+            let id = scoped_binding(&mut b, name, int, 0);
+            let value = if index == 0 {
+                b.int_const(0, int, sp())
+            } else {
+                b.var(BindingId::from_index(0), int, sp())
+            };
+            statements.push(b.var_decl(id, false, int, value, sp()));
+        }
+        let tir = b.with_layout_context(&cx.pool).finish(&statements);
+        drop(Flow::try_build(&tir, &cx.pool).expect("warmup Flow"));
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            let flow = Flow::try_build(&tir, &cx.pool).expect("declaration-heavy Flow");
+            std::hint::black_box(&flow);
+            samples.push(start.elapsed());
+        }
+        samples.sort_unstable();
+        samples[2]
+    }
+
+    let mut cx = Ctx::new();
+    let small = median_build_time(&mut cx, 1_000);
+    let large = median_build_time(&mut cx, 16_000);
+    println!(
+        "Flow scaling: N=1000 {:?}; N=16000 {:?}; ratio {:.2}",
+        small,
+        large,
+        large.as_secs_f64() / small.as_secs_f64()
+    );
+    assert!(
+        large.as_secs_f64() <= small.as_secs_f64() * 24.0,
+        "16x declarations took {:.3?} -> {:.3?}; quadratic membership scans regressed",
+        small,
+        large
+    );
+}
+
 // ---------- fire_points (shared firing-point resolver) ----------
 
 use super::fire_points::{AfterStepFire, FirePoint, FirePoints, FireVerdict};
@@ -1038,7 +1519,7 @@ fn fire_points_basic_positions_resolve_exactly() {
     let one = b.int_const(1, int, sp());
     let two = b.int_const(2, int, sp());
     let sum = b.binary(TirTag::IAdd, int, one, two, sp());
-    let decl = b.var_decl(cx.x, false, int, sum, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, sum, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -1067,7 +1548,7 @@ fn fire_points_after_step_inside_expression_reanchors_to_statement_root() {
     let one = b.int_const(1, int, sp());
     let two = b.int_const(2, int, sp());
     let sum = b.binary(TirTag::IAdd, int, one, two, sp());
-    let decl = b.var_decl(cx.x, false, int, sum, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, sum, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -1103,11 +1584,11 @@ fn fire_points_after_step_uses_first_root_at_or_after_anchor() {
     // Two statements: the anchor lives in the SECOND statement's
     // operand tree — the boundary is after statement 2, not statement 1.
     let a = b.int_const(1, int, sp());
-    let decl_a = b.var_decl(cx.x, false, int, a, sp());
+    let decl_a = var_decl(&mut b, cx.x, false, int, a, sp());
     let c = b.int_const(3, int, sp());
     let d = b.int_const(4, int, sp());
     let sum2 = b.binary(TirTag::IAdd, int, c, d, sp());
-    let decl_b = b.var_decl(cx.i, false, int, sum2, sp());
+    let decl_b = var_decl(&mut b, cx.i, false, int, sum2, sp());
     let tir = b.finish(&[decl_a, decl_b]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -1132,13 +1613,15 @@ fn fire_points_after_step_without_following_root_is_block_terminator() {
     let bool_ty = cx.pool.bool_();
     let t = cx.pool.intern_str("t");
     let mut b = cx.builder();
+    let initial_t = b.bool_const(true, bool_ty, sp());
+    let t_decl = var_decl(&mut b, t, false, bool_ty, initial_t, sp());
     // A while condition block holds only operand steps (the condition
     // tree's parent is the loop payload): no root at/after the anchor.
-    let cond = b.var(t, bool_ty, sp());
-    let body_read = b.var(t, bool_ty, sp());
+    let cond = var(&mut b, t, bool_ty, sp());
+    let body_read = var(&mut b, t, bool_ty, sp());
     let body_expr = b.unary(TirTag::ExprStmt, cx.void, body_read, sp());
     let whl = b.while_loop(cond, &[body_expr], cx.void, sp());
-    let tir = b.finish(&[whl]);
+    let tir = b.finish(&[t_decl, whl]);
 
     let flow = Flow::build(&tir, &cx.pool);
     let fp = FirePoints::new(&flow);
@@ -1164,12 +1647,12 @@ fn fire_points_if_payload_resolves_every_arm_continuation() {
     let int = cx.int;
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
-    let decl = b.var_decl(cx.x, true, int, zero, sp());
-    let cond = b.var(cx.x, int, sp());
+    let decl = var_decl(&mut b, cx.x, true, int, zero, sp());
+    let cond = var(&mut b, cx.x, int, sp());
     let one = b.int_const(1, int, sp());
-    let then_a = b.assign(cx.x, int, one, sp());
+    let then_a = assign(&mut b, cx.x, int, one, sp());
     let two = b.int_const(2, int, sp());
-    let else_a = b.assign(cx.x, int, two, sp());
+    let else_a = assign(&mut b, cx.x, int, two, sp());
     let ifs = b.if_stmt(cond, &[then_a], &[], Some(&[else_a]), cx.void, sp());
     let tir = b.finish(&[decl, ifs]);
 
@@ -1193,12 +1676,12 @@ fn fire_points_if_payload_partial_divergence_skips_diverging_arms() {
     let int = cx.int;
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
-    let decl = b.var_decl(cx.x, true, int, zero, sp());
+    let decl = var_decl(&mut b, cx.x, true, int, zero, sp());
     let cond = b.bool_const(true, cx.pool.bool_(), sp());
     // Then arm diverges (returns); else arm falls through.
     let ret = b.return_void(cx.void, sp());
     let one = b.int_const(1, int, sp());
-    let else_a = b.assign(cx.x, int, one, sp());
+    let else_a = assign(&mut b, cx.x, int, one, sp());
     let ifs = b.if_stmt(cond, &[ret], &[], Some(&[else_a]), cx.void, sp());
     let tir = b.finish(&[decl, ifs]);
 
@@ -1279,11 +1762,13 @@ fn fire_points_loop_payload_resolves_the_exit_block() {
     let bool_ty = cx.pool.bool_();
     let t = cx.pool.intern_str("t");
     let mut b = cx.builder();
-    let cond = b.var(t, bool_ty, sp());
-    let body_read = b.var(t, bool_ty, sp());
+    let initial_t = b.bool_const(true, bool_ty, sp());
+    let t_decl = var_decl(&mut b, t, false, bool_ty, initial_t, sp());
+    let cond = var(&mut b, t, bool_ty, sp());
+    let body_read = var(&mut b, t, bool_ty, sp());
     let body_expr = b.unary(TirTag::ExprStmt, cx.void, body_read, sp());
     let whl = b.while_loop(cond, &[body_expr], cx.void, sp());
-    let tir = b.finish(&[whl]);
+    let tir = b.finish(&[t_decl, whl]);
 
     let flow = Flow::build(&tir, &cx.pool);
     let fp = FirePoints::new(&flow);
@@ -1306,9 +1791,10 @@ fn fire_points_loop_payload_resolves_the_exit_block() {
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
     let ten = b.int_const(10, int, sp());
-    let read_i = b.var(cx.i, int, sp());
+    let induction = declare(&mut b, cx.i, int, false);
+    let read_i = var(&mut b, cx.i, int, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, read_i, sp());
-    let f = b.for_range(cx.i, zero, ten, &[expr], cx.void, sp());
+    let f = for_range(&mut b, induction, zero, ten, &[expr], cx.void, sp());
     let tir = b.finish(&[f]);
     let flow = Flow::build(&tir, &cx.pool);
     let fp = FirePoints::new(&flow);
@@ -1332,22 +1818,24 @@ fn fire_points_while_compound_condition_resolves_the_loop_exit() {
     let bool_ty = cx.pool.bool_();
     let t = cx.pool.intern_str("t");
     let mut b = cx.builder();
+    let initial_t = b.bool_const(true, bool_ty, sp());
+    let t_decl = var_decl(&mut b, t, false, bool_ty, initial_t, sp());
     // `while t and t:` — the and-split terminates the header block, so
     // the header's terminator is not the loop test: the test is located
     // through the condition's blocks and the completion point resolves
     // EXACTLY to the exit block's entry point (the same bucket the
     // simple-condition shape resolves to).
-    let lhs = b.var(t, bool_ty, sp());
-    let rhs = b.var(t, bool_ty, sp());
+    let lhs = var(&mut b, t, bool_ty, sp());
+    let rhs = var(&mut b, t, bool_ty, sp());
     let cond = b.binary(TirTag::BoolAnd, bool_ty, lhs, rhs, sp());
-    let body_read = b.var(t, bool_ty, sp());
+    let body_read = var(&mut b, t, bool_ty, sp());
     let body_expr = b.unary(TirTag::ExprStmt, cx.void, body_read, sp());
     let whl = b.while_loop(cond, &[body_expr], cx.void, sp());
     // A post-loop statement lands in the exit block after its prologue,
     // so the resolution must land before that statement.
-    let tail_read = b.var(t, bool_ty, sp());
+    let tail_read = var(&mut b, t, bool_ty, sp());
     let tail_expr = b.unary(TirTag::ExprStmt, cx.void, tail_read, sp());
-    let tir = b.finish(&[whl, tail_expr]);
+    let tir = b.finish(&[t_decl, whl, tail_expr]);
 
     let mut flow = Flow::build(&tir, &cx.pool);
     let fp = FirePoints::new(&flow);
@@ -1400,11 +1888,11 @@ fn fire_points_while_compound_condition_resolves_the_loop_exit() {
     let fp = FirePoints::new(&flow);
     assert_eq!(
         fp.resolve_after_step(whl),
-        AfterStepFire::Payload(FireVerdict::NonExact(pt(flow.entry, 0)))
+        AfterStepFire::Payload(FireVerdict::NonExact(pt(flow.entry, 2)))
     );
     assert_eq!(
         fp.resolve(DropPosition::AfterStep { inst: whl }),
-        FireVerdict::NonExact(pt(flow.entry, 0))
+        FireVerdict::NonExact(pt(flow.entry, 2))
     );
 }
 
@@ -1438,7 +1926,7 @@ fn fire_points_unresolved_never_guesses() {
     let int = cx.int;
     let mut b = cx.builder();
     let one = b.int_const(1, int, sp());
-    let decl = b.var_decl(cx.x, false, int, one, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, one, sp());
     // A stray instruction never emitted into the Flow: neither a step
     // nor a terminator payload.
     let stray = b.int_const(99, int, sp());

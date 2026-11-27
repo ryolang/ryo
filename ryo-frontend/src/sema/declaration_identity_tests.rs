@@ -362,3 +362,81 @@ fn empty_implicit_main_tracks_source_revisions() {
             .is_ok()
     );
 }
+
+#[test]
+fn flow_rejects_use_outside_binding_scope() {
+    let mut pool = InternPool::new();
+    let name = pool.intern_str("main");
+    let binding_name = pool.intern_str("inner");
+    let int = pool.int();
+    let void = pool.void();
+    let span = Span::EMPTY;
+    let mut builder =
+        ryo_core::tir::TirBuilder::new(name, vec![], void, span).with_layout_context(&pool);
+    let inner = builder.register_binding(ryo_core::tir::BindingInfo::new(
+        binding_name,
+        int,
+        ryo_core::tir::BindingKind::Local {
+            mutable: false,
+            borrowed: false,
+        },
+        ryo_core::tir::ScopeId::from_index(7),
+        span,
+    ));
+    let cond = builder.bool_const(true, pool.bool_(), span);
+    let one = builder.int_const(1, int, span);
+    let decl = builder.var_decl(inner, false, int, one, span);
+    let branch = builder.if_stmt(cond, &[decl], &[], None, void, span);
+    let read = builder.var(inner, int, span);
+    let statement = builder.unary(ryo_core::tir::TirTag::ExprStmt, void, read, span);
+    let tir = builder.finish(&[branch, statement]);
+
+    let error = crate::pipeline::BuiltProgram::build(vec![tir], &pool)
+        .analyze(&pool, &mut DiagSink::new())
+        .expect_err("an inner-scope binding must not escape through Flow publication");
+    assert!(
+        format!("{error:?}").contains("outside binding scope"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn flow_preserves_reserved_binding_recovery() {
+    let cases = [
+        (
+            "parameter",
+            "fn f(__ryo_p: int) -> int:\n\treturn __ryo_p\n\nfn main():\n\tprint(f(1))\n",
+        ),
+        ("local", "fn main():\n\t__ryo_value = 1\n"),
+        ("annotated local", "fn main():\n\t__ryo_value: int = 1\n"),
+    ];
+    for (label, input) in cases {
+        let mut context = CompilationContext::new();
+        let (uir, mut pool, mut sink) = lower(&mut context, input);
+        let tirs = analyze(
+            &uir,
+            &mut pool,
+            &mut sink,
+            input,
+            Path::new("test.ryo"),
+            &mut context,
+        );
+        let analyzed = crate::pipeline::BuiltProgram::build(tirs, &pool)
+            .analyze(&pool, &mut sink)
+            .unwrap_or_else(|error| panic!("{label}: recovery must not become an ICE: {error}"));
+        assert!(!analyzed.tirs().is_empty(), "{label}");
+        let diags = sink.into_diags();
+        assert!(
+            diags
+                .iter()
+                .any(|diag| diag.code == DiagCode::ReservedIdentifier),
+            "{label}: missing reserved-name diagnostic: {diags:?}"
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|diag| diag.code == DiagCode::InternalError),
+            "{label}: recovery emitted an internal error: {diags:?}"
+        );
+    }
+}

@@ -30,15 +30,15 @@ fn free_schedule_is_deterministic() {
     // s3 = "c" (dead store); if true: print(s1) else: print("x");
     // print("tmp")
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl1 = tb.var_decl(s1, false, str_ty, lit_a, span);
+    let decl1 = test_var_decl(&mut tb, s1, false, str_ty, lit_a, span);
     let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
-    let decl2 = tb.var_decl(s2, false, str_ty, lit_b, span);
-    let base = tb.var(s1, str_ty, span);
+    let decl2 = test_var_decl(&mut tb, s2, false, str_ty, lit_b, span);
+    let base = test_var(&mut tb, s1, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i1 = tb.int_const(1, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i1), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
-    let vread = tb.var(v, view_ty, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pv = tb.call(
         DeclId::NONE,
         print,
@@ -48,13 +48,13 @@ fn free_schedule_is_deterministic() {
         span,
     );
     let pv_stmt = tb.unary(TirTag::ExprStmt, void, pv, span);
-    let r2 = tb.var(s2, str_ty, span);
+    let r2 = test_var(&mut tb, s2, str_ty, span);
     let ps2 = tb.call(DeclId::NONE, print, &[r2], &all_borrow(&[r2]), void, span);
     let ps2_stmt = tb.unary(TirTag::ExprStmt, void, ps2, span);
     let lit_c = tb.str_const(pool.intern_str("c"), str_ty, span);
-    let decl3 = tb.var_decl(s3, false, str_ty, lit_c, span);
+    let decl3 = test_var_decl(&mut tb, s3, false, str_ty, lit_c, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let r1 = tb.var(s1, str_ty, span);
+    let r1 = test_var(&mut tb, s1, str_ty, span);
     let ps1 = tb.call(DeclId::NONE, print, &[r1], &all_borrow(&[r1]), void, span);
     let ps1_stmt = tb.unary(TirTag::ExprStmt, void, ps1, span);
     let xlit = tb.str_const(pool.intern_str("x"), str_ty, span);
